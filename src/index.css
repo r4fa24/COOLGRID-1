@@ -1,0 +1,61 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-heat-300: #fdba74;
+  --color-heat-400: #fb923c;
+  --color-heat-500: #f97316;
+  --color-heat-600: #ea580c;
+
+  --color-coral-400: #fb7185;
+  --color-coral-500: #f43f5e;
+
+  --color-mint-300: #5eead4;
+  --color-mint-400: #2dd4bf;
+  --color-mint-500: #14b8a6;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: #0f172a;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(120% 90% at 12% 0%, #ffe8d1 0%, rgba(255, 232, 209, 0) 55%),
+    radial-gradient(100% 80% at 92% 8%, #d6f6f1 0%, rgba(214, 246, 241, 0) 50%),
+    linear-gradient(180deg, #fbfdff 0%, #f2f7fb 100%);
+  background-attachment: fixed;
+}
+
+/* Let the airy page gradient show through MapLibre's default chrome. */
+.maplibregl-ctrl-attrib.maplibregl-compact {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.maplibregl-ctrl-top-left:has(.maplibregl-ctrl-attrib) {
+  top: 4.25rem;
+  left: 0.75rem;
+}
+
+.zone-inspector {
+  height: min(75vh, 42rem);
+  max-height: 100%;
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 639px) {
+  .maplibregl-ctrl-top-left:has(.maplibregl-ctrl-attrib) {
+    top: 4.5rem;
+  }
+}
