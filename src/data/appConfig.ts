@@ -1,4 +1,4 @@
-export const APP_NAME = 'HeatWise'
+export const APP_NAME = 'CoolGrid'
 export const APP_TAGLINE = 'Urban heat intelligence for extreme-heat cities'
 
 /**

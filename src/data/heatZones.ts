@@ -180,6 +180,15 @@ function generateZones(): HeatZone[] {
 
 export const HEAT_ZONES: HeatZone[] = generateZones()
 
+export function findNearestHeatZone(latitude: number, longitude: number) {
+  return HEAT_ZONES.reduce((nearest, zone) => {
+    const latitudeDistance = zone.center.lat - latitude
+    const longitudeDistance = (zone.center.lng - longitude) * Math.cos((latitude * Math.PI) / 180)
+    const distance = latitudeDistance ** 2 + longitudeDistance ** 2
+    return distance < nearest.distance ? { zone, distance } : nearest
+  }, { zone: HEAT_ZONES[0], distance: Number.POSITIVE_INFINITY }).zone
+}
+
 export const HEAT_ZONE_COLLECTION: FeatureCollection<Polygon> = {
   type: 'FeatureCollection',
   features: HEAT_ZONES.map((zone) => ({

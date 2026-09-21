@@ -1,5 +1,5 @@
 import { X } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   calculateHeatExposure,
   explainHeatExposure,
@@ -13,13 +13,27 @@ type ZoneInspectorProps = {
   onClose: () => void
   onSimulatedScoreChange: (score: number | null) => void
   planner?: boolean
+  residentLocationStatus?: 'requesting' | 'available' | 'unavailable'
 }
 
-export function ZoneInspector({ zone, onClose, onSimulatedScoreChange, planner = true }: ZoneInspectorProps) {
+export function ZoneInspector({
+  zone,
+  onClose,
+  onSimulatedScoreChange,
+  planner = true,
+  residentLocationStatus = 'unavailable',
+}: ZoneInspectorProps) {
   if (!zone) {
     return (
-      <div className="pointer-events-auto w-full max-w-[calc(100vw-2rem)] rounded-3xl bg-white/70 px-5 py-4 text-sm text-slate-500 shadow-xl shadow-slate-900/10 ring-1 ring-white/60 backdrop-blur-xl sm:w-96">
-        Select a heat zone to inspect
+      <div className="pointer-events-auto w-full max-w-[calc(100vw-2rem)] rounded-3xl bg-white/70 px-5 py-4 text-sm text-slate-600 shadow-xl shadow-slate-900/10 ring-1 ring-white/60 backdrop-blur-xl sm:w-96">
+        {planner || residentLocationStatus === 'available' ? (
+          'Select a heat zone to inspect'
+        ) : (
+          <>
+            <p className="font-semibold text-slate-800">Location unavailable</p>
+            <p className="mt-1">Select an area on the map to view heat exposure.</p>
+          </>
+        )}
       </div>
     )
   }
@@ -62,13 +76,18 @@ function ZoneInspectorContent({
   const exposureReduction = score > 0 ? Math.round(((score - simulatedHeatExposure.score) / score) * 100) : 0
 
   return (
-    <div className="zone-inspector pointer-events-auto flex w-full min-h-0 max-w-[calc(100vw-2rem)] flex-col overflow-y-auto rounded-3xl bg-white/75 p-6 shadow-2xl shadow-slate-900/15 ring-1 ring-white/60 backdrop-blur-xl sm:w-96">
+    <div className="zone-inspector pointer-events-auto flex w-full min-h-0 max-w-[calc(100vw-2rem)] flex-col overflow-y-auto rounded-3xl bg-white/75 p-7 shadow-2xl shadow-slate-900/15 ring-1 ring-white/60 backdrop-blur-xl sm:w-[30rem]">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold tracking-[0.18em] text-slate-400 uppercase">
+          {!planner && (
+            <p className="text-sm font-semibold tracking-[0.14em] text-teal-600 uppercase">
+              Selected zone
+            </p>
+          )}
+          <p className="text-sm font-semibold tracking-[0.18em] text-slate-400 uppercase">
             {zone.district}
           </p>
-          <h2 className="text-2xl font-semibold text-slate-900">{zone.name}</h2>
+          <h2 className="text-3xl font-semibold tracking-tight text-slate-900">{zone.name}</h2>
         </div>
         <button
           type="button"
@@ -80,13 +99,13 @@ function ZoneInspectorContent({
         </button>
       </div>
 
-      <div className="mt-5 flex items-end gap-3">
-        <span className="text-5xl leading-none font-light text-slate-900">
+      <div className="mt-4 flex items-end gap-3">
+        <span className="text-6xl leading-none font-light text-slate-900">
           {score}
-          <span className="align-top text-2xl text-slate-400">/100</span>
+          <span className="align-top text-3xl text-slate-400">/100</span>
         </span>
         <span
-          className="mb-1 rounded-full px-3 py-1 text-xs font-semibold text-white"
+          className="mb-1 rounded-full px-4 py-1.5 text-sm font-semibold text-white"
           style={{ backgroundColor: category.color }}
         >
           {category.label}
@@ -99,7 +118,7 @@ function ZoneInspectorContent({
         {explanation}
       </p>
 
-      <dl className="mt-5 space-y-3 text-sm">
+      <dl className="mt-4 space-y-2.5 text-sm">
         <Factor
           label="Temperature"
           value={`${factors.temperatureC}°C`}
@@ -125,7 +144,7 @@ function ZoneInspectorContent({
         />
       </dl>
 
-      {planner && <section className="mt-6 border-t border-slate-900/10 pt-5" aria-labelledby="human-exposure-heading">
+      {planner && <section className="mt-5 border-t border-slate-900/10 pt-4" aria-labelledby="human-exposure-heading">
         <h3 id="human-exposure-heading" className="text-sm font-semibold text-slate-900">
           Human exposure
         </h3>
@@ -144,12 +163,14 @@ function ZoneInspectorContent({
         </div>
       </section>}
 
-      {planner && <section className="mt-6 border-t border-slate-900/10 pt-5" aria-labelledby="zone-attention-heading">
+      {planner && <section className="mt-5 border-t border-slate-900/10 pt-4" aria-labelledby="zone-attention-heading">
         <h3 id="zone-attention-heading" className="text-sm font-semibold text-slate-900">
           Why this zone needs attention
         </h3>
 
-        <div className="mt-4 space-y-4 text-sm">
+        <div className="mt-3 space-y-3 text-sm">
+          <p className="leading-relaxed text-slate-600">{intelligence.attentionSummary}</p>
+
           <IntelligenceGroup title="Key Heat Drivers">
             <ul className="list-disc space-y-1 pl-5 text-slate-600">
               {intelligence.keyHeatDrivers.map((driver) => (
@@ -162,10 +183,27 @@ function ZoneInspectorContent({
             <p className="leading-relaxed text-slate-600">{intelligence.coolingConditions}</p>
           </IntelligenceGroup>
 
-          <IntelligenceGroup title="Recommended Interventions">
+          <div className="rounded-2xl bg-amber-300/15 px-4 py-3.5 ring-1 ring-amber-300/30">
+            <h4 className="text-xs font-semibold tracking-[0.14em] text-slate-500 uppercase">
+              Recommended Intervention
+            </h4>
+            <p className="mt-2 font-semibold leading-relaxed text-slate-800">
+              {intelligence.recommendedIntervention}
+            </p>
+            <p className="mt-3 text-xs font-semibold tracking-[0.12em] text-slate-400 uppercase">
+              Why this intervention
+            </p>
+            <p className="mt-1.5 leading-relaxed text-slate-600">{intelligence.interventionWhy}</p>
+            <p className="mt-3 text-xs font-semibold tracking-[0.12em] text-slate-400 uppercase">
+              Expected simulated impact
+            </p>
+            <p className="mt-1.5 leading-relaxed text-slate-600">{describeExpectedImpact(scoreDifference)}</p>
+          </div>
+
+          <IntelligenceGroup title="Other Recommended Interventions">
             <ul className="list-disc space-y-1 pl-5 text-slate-600">
               {intelligence.recommendedInterventions.map((intervention) => (
-                <li key={intervention}>{intervention}</li>
+                intervention !== intelligence.recommendedIntervention && <li key={intervention}>{intervention}</li>
               ))}
             </ul>
           </IntelligenceGroup>
@@ -207,6 +245,109 @@ function ZoneInspectorContent({
           onSimulatedScoreChange(null)
         }}
       />}
+
+      {planner && (
+        <PlanningSubmission
+          zone={zone}
+          score={score}
+          recommendedIntervention={intelligence.recommendedIntervention}
+          simulatedScore={simulatedHeatExposure.score}
+          scoreDifference={scoreDifference}
+        />
+      )}
+    </div>
+  )
+}
+
+type SubmissionStage = 'idle' | 'preparing' | 'calculating' | 'submitting' | 'submitted'
+
+function PlanningSubmission({
+  zone,
+  score,
+  recommendedIntervention,
+  simulatedScore,
+  scoreDifference,
+}: {
+  zone: HeatZone
+  score: number
+  recommendedIntervention: string
+  simulatedScore: number
+  scoreDifference: number
+}) {
+  const [stage, setStage] = useState<SubmissionStage>('idle')
+
+  useEffect(() => {
+    if (stage === 'idle' || stage === 'submitted') return
+
+    const nextStage: SubmissionStage =
+      stage === 'preparing' ? 'calculating' : stage === 'calculating' ? 'submitting' : 'submitted'
+    const timer = window.setTimeout(() => setStage(nextStage), 700)
+
+    return () => window.clearTimeout(timer)
+  }, [stage])
+
+  const impact = scoreDifference === 0
+    ? '0-point change'
+    : `${scoreDifference > 0 ? '+' : ''}${scoreDifference}-point change`
+  const zoneNumber = zone.id.replace('zone-', '')
+  const reference = `CG-2026-${String(14 + Number(zoneNumber)).padStart(4, '0')}`
+
+  if (stage === 'submitted') {
+    return (
+      <section className="mt-6 border-t border-slate-900/10 pt-5" aria-labelledby="planning-submitted-heading">
+        <div className="rounded-2xl bg-teal-400/10 px-4 py-4 ring-1 ring-teal-400/25">
+          <h3 id="planning-submitted-heading" className="text-sm font-semibold text-slate-900">
+            Planning brief submitted
+          </h3>
+          <dl className="mt-3 space-y-2 text-sm">
+            <SubmissionDetail label="Zone" value={zone.name} />
+            <SubmissionDetail label="Heat Exposure Score" value={`${score}/100`} />
+            <SubmissionDetail label="Intervention" value={recommendedIntervention} />
+            <SubmissionDetail label="Current simulated impact" value={`${score} → ${simulatedScore} (${impact})`} />
+            <SubmissionDetail label="Reference" value={reference} />
+            <SubmissionDetail label="Status" value="Simulated municipal review" />
+          </dl>
+        </div>
+      </section>
+    )
+  }
+
+  const progressLabel =
+    stage === 'preparing'
+      ? 'Preparing planning brief...'
+      : stage === 'calculating'
+        ? 'Calculating intervention impact...'
+        : stage === 'submitting'
+          ? 'Submitting for review...'
+          : null
+
+  return (
+    <section className="mt-6 border-t border-slate-900/10 pt-5" aria-labelledby="planning-submit-heading">
+      <h3 id="planning-submit-heading" className="text-sm font-semibold text-slate-900">
+        Send to Urban Planning
+      </h3>
+      {progressLabel ? (
+        <p className="mt-2 text-sm text-slate-600" aria-live="polite">
+          {progressLabel}
+        </p>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setStage('preparing')}
+          className="mt-3 w-full rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/30"
+        >
+          Send to Urban Planning
+        </button>
+      )}
+    </section>
+  )
+}
+
+function SubmissionDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="text-slate-500">{label}</dt>
+      <dd className="text-right font-medium text-slate-800">{value}</dd>
     </div>
   )
 }
@@ -310,7 +451,7 @@ function WhatIfSimulator({
         </div>
 
         <p className="text-[11px] leading-relaxed text-slate-400">
-          Simulated impact — based on HeatWise&apos;s prototype exposure model.
+          Simulated impact — based on CoolGrid&apos;s prototype exposure model.
         </p>
 
         <button
@@ -337,6 +478,15 @@ function SimulationMetric({ label, value }: { label: string; value: string }) {
 
 function estimatePedestriansPerDay(pedestrianDensityPct: number) {
   return Math.round(400 + pedestrianDensityPct * 16)
+}
+
+function describeExpectedImpact(scoreDifference: number) {
+  if (scoreDifference === 0) {
+    return 'Current scenario produces a 0-point change in estimated heat exposure. Test the intervention in What-If to simulate its potential impact.'
+  }
+
+  const formattedDifference = scoreDifference > 0 ? `+${scoreDifference}` : String(scoreDifference)
+  return `Current What-If scenario produces a ${formattedDifference}-point change in estimated heat exposure. Adjust the intervention in What-If to simulate another potential impact.`
 }
 
 function IntelligenceGroup({ title, children }: { title: string; children: ReactNode }) {

@@ -1,7 +1,7 @@
-import { AttributionControl, Map as MapLibreMap, NavigationControl } from 'maplibre-gl'
+import { AttributionControl, Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl'
 import type { ExpressionSpecification, MapLayerMouseEvent, MapMouseEvent } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { DEMO_AREA, HEAT_BANDS, HEAT_ZONE_COLLECTION } from '../../data/heatZones'
 import { BASEMAP_STYLE_URL } from './mapStyle'
 
@@ -36,11 +36,19 @@ type HeatZoneMapProps = {
   selectedZoneId: string | null
   simulatedScore: number | null
   onSelectZone: (zoneId: string | null) => void
+  currentLocation: { latitude: number; longitude: number } | null
 }
 
-export function HeatZoneMap({ selectedZoneId, simulatedScore, onSelectZone }: HeatZoneMapProps) {
+export const HeatZoneMap = memo(function HeatZoneMap({
+  selectedZoneId,
+  simulatedScore,
+  onSelectZone,
+  currentLocation,
+}: HeatZoneMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MapLibreMap | null>(null)
+  const locationMarkerRef = useRef<Marker | null>(null)
+  const [mapReady, setMapReady] = useState(false)
   const selectHandlerRef = useRef(onSelectZone)
   const simulatedZoneRef = useRef<string | null>(null)
 
@@ -63,6 +71,7 @@ export function HeatZoneMap({ selectedZoneId, simulatedScore, onSelectZone }: He
     map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right')
 
     map.on('load', () => {
+      setMapReady(true)
       map.addSource(SOURCE_ID, { type: 'geojson', data: HEAT_ZONE_COLLECTION })
       // Keep place labels legible on top of the heat overlay.
       const firstLabelLayer = map.getStyle().layers.find((layer) => layer.type === 'symbol')?.id
@@ -143,6 +152,9 @@ export function HeatZoneMap({ selectedZoneId, simulatedScore, onSelectZone }: He
     })
 
     return () => {
+      locationMarkerRef.current?.remove()
+      locationMarkerRef.current = null
+      setMapReady(false)
       map.remove()
       mapRef.current = null
     }
@@ -192,5 +204,36 @@ export function HeatZoneMap({ selectedZoneId, simulatedScore, onSelectZone }: He
     else map.once('load', applySimulation)
   }, [selectedZoneId, simulatedScore])
 
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !currentLocation || !mapReady) return
+
+    const showLocation = () => {
+      if (!map.isStyleLoaded()) return
+      if (!locationMarkerRef.current) {
+        const markerElement = document.createElement('div')
+        markerElement.className = 'current-location-marker'
+        markerElement.setAttribute('aria-label', 'Your current location')
+        locationMarkerRef.current = new Marker({ element: markerElement })
+          .setLngLat([currentLocation.longitude, currentLocation.latitude])
+          .addTo(map)
+      } else {
+        locationMarkerRef.current.setLngLat([currentLocation.longitude, currentLocation.latitude])
+      }
+      map.flyTo({
+        center: [currentLocation.longitude, currentLocation.latitude],
+        essential: true,
+        duration: 700,
+      })
+    }
+
+    if (map.isStyleLoaded()) showLocation()
+    else map.once('load', showLocation)
+
+    return () => {
+      map.off('load', showLocation)
+    }
+  }, [currentLocation, mapReady])
+
   return <div ref={containerRef} className="h-full w-full" />
-}
+})

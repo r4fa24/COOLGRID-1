@@ -8,11 +8,13 @@ import { SimulatedDataBadge } from './SimulatedDataBadge'
 
 export function AppShell({ children }: { children: ReactNode }) {
   const location = useLocation()
-  const isResident = location.pathname === '/resident'
-  const navItems = [
-    { to: isResident ? '/resident' : '/city-intelligence', label: isResident ? 'Heat around you' : 'City Intelligence', icon: MapPinned },
-    { to: '/routes', label: 'HeatWise Routes', icon: Route },
-  ]
+  const isResident = location.pathname === '/resident' || location.pathname === '/routes'
+  const navItems = isResident
+    ? [
+        { to: '/resident', label: 'Heat Map', icon: MapPinned },
+        { to: '/routes', label: 'Route Mapping', icon: Route },
+      ]
+    : [{ to: '/city-intelligence', label: 'Abu Dhabi Urban Planning', icon: MapPinned }]
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-20 bg-white/55 backdrop-blur-xl">

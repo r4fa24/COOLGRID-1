@@ -11,8 +11,11 @@ type IntelligenceItem = {
 }
 
 export type ZoneIntelligence = {
+  attentionSummary: string
   keyHeatDrivers: string[]
   coolingConditions: string
+  recommendedIntervention: string
+  interventionWhy: string
   recommendedInterventions: string[]
 }
 
@@ -20,15 +23,40 @@ export function getZoneIntelligence(zone: HeatZone): ZoneIntelligence {
   const { factors, heatExposure } = zone
   const keyHeatDrivers = getHeatDrivers(factors, heatExposure)
   const recommendations = getRecommendations(factors)
+  const sortedRecommendations = recommendations.sort((a, b) => b.priority - a.priority)
+  const recommendedIntervention = sortedRecommendations[0].label
 
   return {
+    attentionSummary: describeAttention(keyHeatDrivers),
     keyHeatDrivers,
     coolingConditions: describeCoolingConditions(factors.shadePct, factors.vegetationPct),
-    recommendedInterventions: recommendations
-      .sort((a, b) => b.priority - a.priority)
+    recommendedIntervention,
+    interventionWhy: describeInterventionWhy(recommendedIntervention, factors),
+    recommendedInterventions: sortedRecommendations
       .slice(0, 3)
       .map(({ label }) => label),
   }
+}
+
+function describeAttention(drivers: string[]) {
+  const driverSummary = joinWithAnd(drivers.map((driver) => driver.toLowerCase()))
+  return `This zone needs attention because of ${driverSummary}.`
+}
+
+function describeInterventionWhy(intervention: string, factors: HeatZone['factors']) {
+  if (intervention.includes('pedestrian')) {
+    return "This targets the zone's high pedestrian density by directing cooling toward the highest-footfall areas."
+  }
+  if (intervention.includes('solar')) {
+    return `This directly targets the zone's simulated ${factors.solarExposurePct}% solar exposure by adding shade where heat load is highest.`
+  }
+  if (intervention.includes('shaded')) {
+    return `This addresses the zone's limited simulated shade coverage of ${factors.shadePct}%, adding cooling where it is currently most limited.`
+  }
+  if (intervention.includes('vegetation')) {
+    return `This addresses the zone's limited simulated vegetation coverage of ${factors.vegetationPct}%, adding a cooling condition that is currently constrained.`
+  }
+  return `This supports the zone's existing simulated shade and vegetation conditions, helping preserve the cooling they provide.`
 }
 
 function getHeatDrivers(
@@ -144,4 +172,10 @@ function describeShade(level: ReturnType<typeof percentageFactorLevel>) {
 
 function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function joinWithAnd(values: string[]) {
+  if (values.length <= 1) return values[0] ?? 'the current heat conditions'
+  if (values.length === 2) return `${values[0]} and ${values[1]}`
+  return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`
 }

@@ -13,7 +13,7 @@ const roles = [
   {
     to: '/city-intelligence',
     icon: Building2,
-    title: 'City Planner',
+    title: 'Abu Dhabi Urban Planning',
     description: 'Analyze urban heat and explore potential cooling interventions.',
     accent: 'from-amber-300 to-rose-400',
   },
@@ -29,7 +29,7 @@ export function RoleSelectionPage() {
           </div>
           <p className="mt-5 text-sm font-semibold tracking-[0.18em] text-slate-500 uppercase">{APP_NAME}</p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">{APP_TAGLINE}</h1>
-          <p className="mt-8 text-lg font-medium text-slate-700">How will you use HeatWise?</p>
+          <p className="mt-8 text-lg font-medium text-slate-700">How will you use CoolGrid?</p>
         </div>
 
         <div className="mt-8 grid gap-4 md:grid-cols-2">
