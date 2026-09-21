@@ -1,19 +1,94 @@
 import { ArrowUp, CornerUpLeft, CornerUpRight, MapPinCheck } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Panel } from '../components/Panel'
 import { PageHeading } from '../components/PageHeading'
 import { RouteMap } from '../components/routes/RouteMap'
 import { ROUTE_NODES } from '../data/routeNetwork'
+import { exposureCategoryFor } from '../lib/heatExposure'
 import { planRoutes, type PlannedRoute } from '../lib/routePlanning'
+
+const TRAVEL_TIMES = [
+  { value: 8, label: '8:00 AM', exposureMultiplier: 0.68, uvIndex: 3, uvLabel: 'Moderate' },
+  { value: 10, label: '10:00 AM', exposureMultiplier: 0.86, uvIndex: 5, uvLabel: 'Moderate' },
+  { value: 12, label: '12:00 PM', exposureMultiplier: 1.08, uvIndex: 8, uvLabel: 'Very High' },
+  { value: 14, label: '2:00 PM', exposureMultiplier: 1.18, uvIndex: 9, uvLabel: 'Very High' },
+  { value: 16, label: '4:00 PM', exposureMultiplier: 1.12, uvIndex: 8, uvLabel: 'Very High' },
+  { value: 18, label: '6:00 PM', exposureMultiplier: 0.78, uvIndex: 5, uvLabel: 'Moderate' },
+] as const
+type TravelTime = (typeof TRAVEL_TIMES)[number]
+type CurrentLocation = { latitude: number; longitude: number }
 
 export function RoutesPage() {
   const [fromId, setFromId] = useState('')
   const [toId, setToId] = useState('')
+  const [currentLocation, setCurrentLocation] = useState<CurrentLocation | null>(null)
+  const [locationStatus, setLocationStatus] = useState<'requesting' | 'available' | 'unavailable'>(() =>
+    'geolocation' in navigator ? 'requesting' : 'unavailable',
+  )
   const [selectedRoute, setSelectedRoute] = useState<'fastest' | 'coolGrid'>('fastest')
+  const [startRequest, setStartRequest] = useState(0)
+  const [generatedRoute, setGeneratedRoute] = useState<PlannedRoute | null>(null)
+  const [travelTime, setTravelTime] = useState(8)
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const nearestNode = ROUTE_NODES.reduce((closest, node) =>
+          routeNodeDistance(position.coords.latitude, position.coords.longitude, node.coordinate) <
+          routeNodeDistance(position.coords.latitude, position.coords.longitude, closest.coordinate)
+            ? node
+            : closest,
+        )
+        setFromId(nearestNode.id)
+        setGeneratedRoute(null)
+        setCurrentLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        })
+        setLocationStatus('available')
+      },
+      () => setLocationStatus('unavailable'),
+      { enableHighAccuracy: false, maximumAge: 300_000, timeout: 8_000 },
+    )
+  }, [])
   const from = useMemo(() => ROUTE_NODES.find((node) => node.id === fromId) ?? null, [fromId])
   const to = useMemo(() => ROUTE_NODES.find((node) => node.id === toId) ?? null, [toId])
   const comparison = useMemo(() => (from && to ? planRoutes(from.id, to.id) : null), [from, to])
-  const activeRoute = comparison?.[selectedRoute === 'fastest' ? 'fastest' : 'heatWise'] ?? null
+  const timeProfile = TRAVEL_TIMES.find((time) => time.value === travelTime) ?? TRAVEL_TIMES[0]
+  const timedRoutes = useMemo(
+    () =>
+      comparison
+        ? {
+            fastest: withTimedExposure(comparison.fastest, timeProfile.exposureMultiplier),
+            heatWise: withTimedExposure(generatedRoute ?? comparison.heatWise, timeProfile.exposureMultiplier),
+          }
+        : null,
+    [comparison, generatedRoute, timeProfile],
+  )
+  const timedExposureReduction =
+    timedRoutes && timedRoutes.fastest.exposure > 0 && timedRoutes.heatWise.exposure < timedRoutes.fastest.exposure
+      ? Math.round(((timedRoutes.fastest.exposure - timedRoutes.heatWise.exposure) / timedRoutes.fastest.exposure) * 100)
+      : null
+  const activeRoute = timedRoutes?.[selectedRoute === 'fastest' ? 'fastest' : 'heatWise'] ?? null
+  const activeExposureCategory = activeRoute ? exposureCategoryFor(activeRoute.exposure) : null
+  const showExposureWarning =
+    activeExposureCategory?.id === 'high' || activeExposureCategory?.id === 'very-high'
+  const recommendedTime: { time: TravelTime; exposure: number } | null = timedRoutes
+    ? TRAVEL_TIMES.reduce<{ time: TravelTime; exposure: number }>((recommended, time) => {
+        const exposure = withTimedExposure(
+          selectedRoute === 'fastest' ? comparison!.fastest : comparison!.heatWise,
+          time.exposureMultiplier,
+        ).exposure
+        return exposure < recommended.exposure ? { time, exposure } : recommended
+      }, { time: TRAVEL_TIMES[0], exposure: Number.POSITIVE_INFINITY })
+    : null
+  const selectRoute = (route: 'fastest' | 'coolGrid') => {
+    setSelectedRoute(route)
+    setStartRequest(0)
+    setGeneratedRoute(null)
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -21,18 +96,58 @@ export function RoutesPage() {
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
         <Panel title="Trip planner" subtitle="Start and destination">
           <div className="space-y-4">
-            <RouteSelect label="From" value={fromId} onChange={setFromId} excludeId={toId} />
-            <RouteSelect label="To" value={toId} onChange={setToId} excludeId={fromId} />
+            {locationStatus === 'unavailable' ? (
+              <RouteSelect label="From (manual fallback)" value={fromId} onChange={(value) => { setFromId(value); setGeneratedRoute(null) }} excludeId={toId} />
+            ) : (
+              <div className="rounded-2xl bg-slate-900/[0.03] px-3.5 py-3 text-sm text-slate-700">
+                <span className="font-medium text-slate-500">From:</span> Current location
+                {locationStatus === 'requesting' && <span className="ml-2 text-xs text-slate-400">Locating…</span>}
+              </div>
+            )}
+            <RouteSelect label="To" value={toId} onChange={(value) => { setToId(value); setGeneratedRoute(null) }} excludeId={fromId} />
             <p className="rounded-2xl bg-slate-900/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-500">Simulated walking network. Route geometry and heat exposure are estimated for this prototype, not live navigation.</p>
           </div>
         </Panel>
         <Panel title="Route comparison" subtitle="Travel time vs. estimated heat exposure">
-          <div className="h-[28rem] overflow-hidden rounded-2xl bg-slate-900/[0.03]"><RouteMap comparison={comparison} from={from} to={to} /></div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <RouteCard title="Fastest Route" route={comparison?.fastest ?? null} accent="text-rose-500" hint="Shortest walking time." />
-            <RouteCard title="CoolGrid Route" route={comparison?.heatWise ?? null} accent="text-teal-500" hint="Balances walking time with lower estimated heat exposure." />
+          <div className="h-[28rem] overflow-hidden rounded-2xl bg-slate-900/[0.03]"><RouteMap comparison={comparison} from={from} to={to} selectedRoute={selectedRoute} currentLocation={currentLocation} startRequest={startRequest} onReroute={setSelectedRoute} generatedRoute={generatedRoute} onGeneratedRoute={setGeneratedRoute} /></div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900/[0.03] px-4 py-3">
+            <label htmlFor="travel-time" className="text-sm font-semibold text-slate-700">Travel time</label>
+            <select
+              id="travel-time"
+              value={travelTime}
+              onChange={(event) => setTravelTime(Number(event.target.value))}
+              className="rounded-xl border-0 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-900/10 focus:ring-2 focus:ring-teal-500"
+            >
+              {TRAVEL_TIMES.map((time) => <option key={time.value} value={time.value}>{time.label}</option>)}
+            </select>
           </div>
-          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{comparison.exposureReduction !== null ? `↓ ${comparison.exposureReduction}% estimated exposure` : 'No meaningful heat reduction found.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <RouteCard title="Fastest Route" route={timedRoutes?.fastest ?? null} accent="text-rose-500" hint="Shortest walking time." selected={selectedRoute === 'fastest'} onSelect={() => selectRoute('fastest')} />
+            <RouteCard title="CoolGrid Route" route={timedRoutes?.heatWise ?? null} accent="text-teal-500" hint="Balances walking time with lower estimated heat exposure." selected={selectedRoute === 'coolGrid'} onSelect={() => selectRoute('coolGrid')} />
+          </div>
+          <button
+            type="button"
+            onClick={() => setStartRequest((request) => request + 1)}
+            disabled={!activeRoute}
+            className="mt-4 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Start
+          </button>
+          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{timedExposureReduction !== null ? `↓ ${timedExposureReduction}% estimated exposure at ${timeProfile.label}` : 'No meaningful heat reduction found at this time.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
+          {showExposureWarning && (
+            <div className="mt-4 rounded-2xl border border-amber-300/60 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
+              <p className="font-semibold">⚠️ High heat exposure along this route at {timeProfile.label}</p>
+              <p className="mt-1 text-xs text-amber-900/75">UV Index: {timeProfile.uvIndex} — {timeProfile.uvLabel}</p>
+              <p className="mt-1 text-xs text-amber-900/75">Higher heat and sun exposure expected along this route.</p>
+            </div>
+          )}
+          {recommendedTime && (
+            <p className="mt-4 rounded-2xl bg-teal-50/70 px-4 py-3 text-xs leading-relaxed text-teal-900">
+              <span className="font-semibold">Recommended time</span>
+              <span className="mx-1.5">·</span>
+              Consider travelling around <span className="font-semibold">{recommendedTime.time.label}</span> for lower exposure.
+            </p>
+          )}
           <WalkingDirections
             route={activeRoute}
             fromLabel={from?.label ?? null}
@@ -44,6 +159,10 @@ export function RoutesPage() {
       </div>
     </div>
   )
+}
+
+function withTimedExposure(route: PlannedRoute, exposureMultiplier: number): PlannedRoute {
+  return { ...route, exposure: Math.min(100, Math.round(route.exposure * exposureMultiplier)) }
 }
 
 function WalkingDirections({
@@ -185,8 +304,14 @@ function RouteSelect({ label, value, onChange, excludeId }: { label: string; val
   return <label className="block text-sm font-medium text-slate-700">{label}<select value={value} onChange={(event) => onChange(event.target.value)} className="mt-2 w-full rounded-2xl bg-white/70 px-3.5 py-3 text-sm font-normal text-slate-700 outline-none ring-1 ring-slate-900/10 transition focus:ring-teal-400"><option value="">Select a location</option>{ROUTE_NODES.filter((node) => node.id !== excludeId).map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
 }
 
-function RouteCard({ title, route, accent, hint }: { title: string; route: PlannedRoute | null; accent: string; hint: string }) {
-  return <div className="rounded-2xl bg-slate-900/[0.03] p-4"><p className={`text-sm font-semibold ${accent}`}>{title}</p><dl className="mt-3 space-y-2 text-sm"><Metric label="Walking time" value={route ? `${route.walkingMinutes} min` : '—'} /><Metric label="Distance" value={route ? `${(route.distanceMeters / 1000).toFixed(1)} km` : '—'} /><Metric label="Estimated heat exposure" value={route ? `${route.exposure}/100` : '—'} /></dl><p className="mt-3 text-xs text-slate-400">{hint}</p></div>
+function RouteCard({ title, route, accent, hint, selected, onSelect }: { route: PlannedRoute | null; title: string; accent: string; hint: string; selected: boolean; onSelect: () => void }) {
+  return <button type="button" onClick={onSelect} aria-pressed={selected} className={`w-full rounded-2xl p-4 text-left transition ${selected ? 'bg-white shadow-md ring-2 ring-slate-900/10' : 'bg-slate-900/[0.03] opacity-70 hover:opacity-100'}`}><p className={`text-sm font-semibold ${accent}`}>{selected ? `${title} · Selected` : title}</p><dl className="mt-3 space-y-2 text-sm"><Metric label="Walking time" value={route ? `${route.walkingMinutes} min` : '—'} /><Metric label="Distance" value={route ? `${(route.distanceMeters / 1000).toFixed(1)} km` : '—'} /><Metric label="Estimated heat exposure" value={route ? `${route.exposure}/100` : '—'} /></dl><p className="mt-3 text-xs text-slate-400">{hint}</p></button>
+}
+
+function routeNodeDistance(latitude: number, longitude: number, coordinate: [number, number]) {
+  const latitudeDistance = latitude - coordinate[1]
+  const longitudeDistance = (longitude - coordinate[0]) * Math.cos((latitude * Math.PI) / 180)
+  return latitudeDistance ** 2 + longitudeDistance ** 2
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

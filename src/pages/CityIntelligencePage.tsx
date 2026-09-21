@@ -46,22 +46,26 @@ export function CityIntelligencePage({ planner = true }: { planner?: boolean }) 
       return
     }
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const nearestZone = findNearestHeatZone(position.coords.latitude, position.coords.longitude)
-        setSelectedZoneId(nearestZone.id)
-        storeResidentZoneId(nearestZone.id)
-        setResidentLocation({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        })
-        setResidentLocationStatus('available')
-      },
-      () => {
-        setResidentLocationStatus('unavailable')
-      },
-      { enableHighAccuracy: false, maximumAge: 300_000, timeout: 8_000 },
-    )
+    let frameId = requestAnimationFrame(() => {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const nearestZone = findNearestHeatZone(position.coords.latitude, position.coords.longitude)
+          setSelectedZoneId(nearestZone.id)
+          storeResidentZoneId(nearestZone.id)
+          setResidentLocation({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          })
+          setResidentLocationStatus('available')
+        },
+        () => {
+          setResidentLocationStatus('unavailable')
+        },
+        { enableHighAccuracy: false, maximumAge: 300_000, timeout: 8_000 },
+      )
+    })
+
+    return () => cancelAnimationFrame(frameId)
   }, [planner])
 
   const handleSelectZone = useCallback((zoneId: string | null) => {

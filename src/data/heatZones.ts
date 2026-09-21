@@ -209,7 +209,9 @@ export function summarizeZones(zones: HeatZone[]) {
   const count = zones.length || 1
   const avgTemperature = zones.reduce((total, zone) => total + zone.factors.temperatureC, 0) / count
   const avgHumidity = zones.reduce((total, zone) => total + zone.factors.humidityPct, 0) / count
-  const highExposure = zones.filter((zone) => zone.heatExposure.category.id === 'very-high').length
+  const highExposure = zones.filter(
+    (zone) => zone.heatExposure.category.id === 'high' || zone.heatExposure.category.id === 'very-high',
+  ).length
 
   return {
     zoneCount: zones.length,

@@ -63,6 +63,32 @@ body {
   box-shadow: 0 0 0 6px rgba(20, 184, 166, 0.28), 0 3px 10px rgba(15, 23, 42, 0.28);
 }
 
+.route-current-location-marker {
+  padding: 0.3rem 0.55rem;
+  border: 2px solid #ffffff;
+  border-radius: 9999px;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.3);
+}
+
+.route-progress-marker {
+  display: flex;
+  width: 1.1rem;
+  height: 1.1rem;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #ffffff;
+  border-radius: 9999px;
+  background: #f59e0b;
+  color: #ffffff;
+  font-size: 0.65rem;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.25), 0 2px 8px rgba(15, 23, 42, 0.3);
+}
 
 @media (max-width: 639px) {
   .maplibregl-ctrl-top-left:has(.maplibregl-ctrl-attrib) {
