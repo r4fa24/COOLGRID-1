@@ -151,6 +151,7 @@ export const HeatZoneMap = memo(function HeatZoneMap({
     })
 
     map.on('click', (event: MapMouseEvent) => {
+      if (!map.isStyleLoaded() || !map.getLayer(FILL_LAYER)) return
       const hits = map.queryRenderedFeatures(event.point, {
         layers: [FILL_LAYER],
       })
