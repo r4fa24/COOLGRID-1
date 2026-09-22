@@ -4,6 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { ROUTE_EDGES, type RouteNode } from '../../data/routeNetwork'
 import type { PlannedRoute, RouteComparison } from '../../lib/routePlanning'
+import '../map/maplibreWorker'
 import { BASEMAP_STYLE_URL } from '../map/mapStyle'
 
 type RouteMapProps = {

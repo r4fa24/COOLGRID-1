@@ -3,6 +3,7 @@ import type { ExpressionSpecification, MapLayerMouseEvent, MapMouseEvent } from 
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { memo, useEffect, useRef, useState } from 'react'
 import { DEMO_AREA, HEAT_BANDS, HEAT_ZONE_COLLECTION } from '../../data/heatZones'
+import './maplibreWorker'
 import { BASEMAP_STYLE_URL } from './mapStyle'
 
 const SOURCE_ID = 'heat-zones'
