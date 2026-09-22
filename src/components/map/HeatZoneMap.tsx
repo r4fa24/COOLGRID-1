@@ -10,6 +10,12 @@ const FILL_LAYER = 'heat-zones-fill'
 const LINE_LAYER = 'heat-zones-line'
 const SELECTED_LAYER = 'heat-zones-selected'
 
+const zoneFeatureId = (zoneId: string | null): number | null => {
+  if (!zoneId || !zoneId.startsWith('zone-')) return null
+  const featureId = Number(zoneId.replace('zone-', ''))
+  return Number.isFinite(featureId) ? featureId : null
+}
+
 const fillIntensityExpression = [
   'coalesce',
   ['feature-state', 'simulatedIntensity'],
@@ -152,6 +158,12 @@ export const HeatZoneMap = memo(function HeatZoneMap({
     })
 
     return () => {
+      if (simulatedZoneRef.current) {
+        const previousFeatureId = zoneFeatureId(simulatedZoneRef.current)
+        if (previousFeatureId !== null) {
+          map.removeFeatureState({ source: SOURCE_ID, id: previousFeatureId }, 'simulatedIntensity')
+        }
+      }
       locationMarkerRef.current?.remove()
       locationMarkerRef.current = null
       setMapReady(false)
@@ -180,23 +192,26 @@ export const HeatZoneMap = memo(function HeatZoneMap({
     const applySimulation = () => {
       if (!map.getLayer(FILL_LAYER)) return
 
-      if (simulatedZoneRef.current && simulatedZoneRef.current !== selectedZoneId) {
-        map.removeFeatureState(
-          { source: SOURCE_ID, id: Number(simulatedZoneRef.current.replace('zone-', '')) },
-          'simulatedIntensity',
-        )
+      const previousFeatureId = zoneFeatureId(simulatedZoneRef.current)
+      const currentFeatureId = zoneFeatureId(selectedZoneId)
+
+      if (previousFeatureId !== null && simulatedZoneRef.current !== selectedZoneId) {
+        map.removeFeatureState({ source: SOURCE_ID, id: previousFeatureId }, 'simulatedIntensity')
       }
 
-      if (selectedZoneId) {
-        const feature = { source: SOURCE_ID, id: Number(selectedZoneId.replace('zone-', '')) }
+      if (currentFeatureId !== null) {
+        const feature = { source: SOURCE_ID, id: currentFeatureId }
         if (simulatedScore === null) {
           map.removeFeatureState(feature, 'simulatedIntensity')
+          simulatedZoneRef.current = null
         } else {
           map.setFeatureState(feature, {
             simulatedIntensity: Math.min(1, Math.max(0, simulatedScore / 100)),
           })
           simulatedZoneRef.current = selectedZoneId
         }
+      } else {
+        simulatedZoneRef.current = null
       }
     }
 
