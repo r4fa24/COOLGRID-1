@@ -105,7 +105,7 @@ export function RoutesPage() {
               </div>
             )}
             <RouteSelect label="To" value={toId} onChange={(value) => { setToId(value); setGeneratedRoute(null) }} excludeId={fromId} />
-            <p className="rounded-2xl bg-slate-900/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-500">Simulated walking network. Route geometry and heat exposure are estimated for this prototype, not live navigation.</p>
+            <p className="rounded-2xl bg-slate-900/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-500">Simulated walking network. Route geometry and heat exposure are estimated for this prototype, not live navigation. While a trip is running, the route ahead is re-planned every few seconds on the same estimated data and a cooler alternative is offered when one appears.</p>
           </div>
         </Panel>
         <Panel title="Route comparison" subtitle="Travel time vs. estimated heat exposure">
@@ -123,7 +123,7 @@ export function RoutesPage() {
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <RouteCard title="Fastest Route" route={timedRoutes?.fastest ?? null} accent="text-rose-500" hint="Shortest walking time." selected={selectedRoute === 'fastest'} onSelect={() => selectRoute('fastest')} />
-            <RouteCard title="CoolGrid Route" route={timedRoutes?.heatWise ?? null} accent="text-teal-500" hint="Balances walking time with lower estimated heat exposure." selected={selectedRoute === 'coolGrid'} onSelect={() => selectRoute('coolGrid')} />
+            <RouteCard title={generatedRoute ? 'CoolGrid Route · remaining trip' : 'CoolGrid Route'} route={timedRoutes?.heatWise ?? null} accent="text-teal-500" hint={generatedRoute ? 'Rerouted mid-trip: these figures cover the walk still ahead, so they are not comparable to the full fastest route.' : 'Balances walking time with lower estimated heat exposure.'} selected={selectedRoute === 'coolGrid'} onSelect={() => selectRoute('coolGrid')} />
           </div>
           <button
             type="button"
@@ -133,7 +133,7 @@ export function RoutesPage() {
           >
             Start
           </button>
-          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{timedExposureReduction !== null ? `↓ ${timedExposureReduction}% estimated exposure at ${timeProfile.label}` : 'No meaningful heat reduction found at this time.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
+          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{generatedRoute ? 'Rerouted mid-trip — the CoolGrid card now covers the remaining walk only.' : timedExposureReduction !== null ? `↓ ${timedExposureReduction}% estimated exposure at ${timeProfile.label}` : 'No meaningful heat reduction found at this time.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
           {showExposureWarning && (
             <div className="mt-4 rounded-2xl border border-amber-300/60 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
               <p className="font-semibold">⚠️ High heat exposure along this route at {timeProfile.label}</p>
@@ -201,8 +201,8 @@ function WalkingDirections({
 
       {steps.length > 0 ? (
         <ol className="mt-4 space-y-3">
-          {steps.map(({ icon: Icon, label, distance }) => (
-            <li key={`${label}-${distance}`} className="flex items-center gap-3 text-sm text-slate-600">
+          {steps.map(({ icon: Icon, label, distance }, index) => (
+            <li key={`${index}-${label}`} className="flex items-center gap-3 text-sm text-slate-600">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-400/15 text-teal-700">
                 <Icon className="h-4 w-4" />
               </span>
@@ -242,26 +242,35 @@ function RouteChoice({
   )
 }
 
+/** Turns shorter than this are treated as the street bending, not an
+ *  instruction, so a route of hundreds of OSM vertices reads as a few steps. */
+const MIN_STEP_METERS = 60
+
 function buildWalkingSteps(route: PlannedRoute, fromLabel: string, toLabel: string) {
-  const segmentSteps = route.coordinates.slice(0, -1).map((coordinate, index) => {
-    const nextCoordinate = route.coordinates[index + 1]
-    const previousCoordinate = route.coordinates[index - 1]
-    const distance = Math.max(1, Math.round(distanceBetween(coordinate, nextCoordinate)))
-    const direction = previousCoordinate
-      ? turnDirection(previousCoordinate, coordinate, nextCoordinate)
-      : 'straight'
-
-    return {
-      icon: direction === 'left' ? CornerUpLeft : direction === 'right' ? CornerUpRight : ArrowUp,
-      label: index === 0 ? `Start at ${fromLabel}` : direction === 'straight' ? 'Continue straight' : `Turn ${direction}`,
-      distance: index === 0 ? null : `${distance} m`,
-    }
-  })
-
-  return [
-    ...segmentSteps,
-    { icon: MapPinCheck, label: `Arrive at ${toLabel}`, distance: null },
+  const steps: { icon: typeof ArrowUp; label: string; distance: string | null }[] = [
+    { icon: ArrowUp, label: `Start at ${fromLabel}`, distance: null },
   ]
+  let walked = 0
+
+  for (let index = 1; index < route.coordinates.length; index += 1) {
+    walked += distanceBetween(route.coordinates[index - 1], route.coordinates[index])
+    const nextCoordinate = route.coordinates[index + 1]
+    if (!nextCoordinate || walked < MIN_STEP_METERS) continue
+    const direction = turnDirection(route.coordinates[index - 1], route.coordinates[index], nextCoordinate)
+    if (direction === 'straight') continue
+    steps.push({
+      icon: direction === 'left' ? CornerUpLeft : CornerUpRight,
+      label: `Turn ${direction}`,
+      distance: `${Math.round(walked)} m`,
+    })
+    walked = 0
+  }
+
+  if (walked >= 1) {
+    steps.push({ icon: ArrowUp, label: 'Continue straight', distance: `${Math.round(walked)} m` })
+  }
+  steps.push({ icon: MapPinCheck, label: `Arrive at ${toLabel}`, distance: null })
+  return steps
 }
 
 function turnDirection(

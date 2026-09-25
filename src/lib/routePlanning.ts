@@ -1,14 +1,50 @@
+/**
+ * Walking route planner for CoolGrid Routes.
+ *
+ * Both routes are searched independently on the same baked OpenStreetMap
+ * pedestrian network (`src/data/walkNetwork.ts`) with Dijkstra, and they only
+ * differ in the edge cost they minimise:
+ *
+ *   fastest   cost = meters
+ *   cool      cost = meters * (1 + heatWeight * max(0, exposure - comfort)/100)
+ *
+ * Only exposure above a comfortable level is penalised, so walking further
+ * through shaded or planted streets stays cheap while crossing an exposed
+ * arterial gets expensive — that is what lets a cooler detour win. Heat
+ * exposure therefore influences which streets the cool route takes, rather
+ * than being scored after the fact. The cool search is run for a few increasing
+ * heat weights and the best result that stays inside the detour cap wins — a
+ * stronger weight is only adopted when it actually buys lower exposure.
+ *
+ * Segment exposure comes from the existing Heat Exposure Score engine: the
+ * simulated zone factors around the segment are interpolated, then shifted by
+ * how much of the segment runs through greenery/shade (`greenFraction` baked
+ * into the network) and by its road class. No exposure model is duplicated
+ * here.
+ */
+
 import { HEAT_ZONES } from '../data/heatZones'
-import { ROUTE_EDGES, ROUTE_NODES, type RouteCoordinate, type RouteEdge } from '../data/routeNetwork'
+import type { HeatZoneFactors } from '../data/heatZones'
+import { ROUTE_NODES, type RouteCoordinate } from '../data/routeNetwork'
+import { WALK_EDGES, WALK_NODES } from '../data/walkNetwork'
+import { calculateHeatExposure } from './heatExposure'
 
 const WALKING_SPEED_METERS_PER_MINUTE = 80
-const MAX_HEATWISE_TIME_MULTIPLIER = 1.25
-
-type Traversal = { edge: RouteEdge; from: string; to: string }
+/** How much longer the cool route may be than the fastest one. */
+const MAX_COOL_DETOUR_MULTIPLIER = 1.6
+/** Heat weights tried for the cool search, from a gentle to a strong bias. */
+const HEAT_WEIGHTS = [1, 2.5, 5, 9, 16]
+/** Exposure the walker tolerates for free; only the excess is penalised. */
+const COMFORT_EXPOSURE = 35
+/** An alternative only counts as cooler when it beats this many score points. */
+const MIN_EXPOSURE_GAIN = 1
 
 export type PlannedRoute = {
   nodeIds: string[]
   coordinates: RouteCoordinate[]
+  /** Length and exposure of each `coordinates` pair, so navigation can score
+   *  the part of the route a walker still has ahead of them. */
+  segments: { meters: number; exposure: number }[]
   distanceMeters: number
   walkingMinutes: number
   exposure: number
@@ -20,78 +56,334 @@ export type RouteComparison = {
   exposureReduction: number | null
 }
 
-const zoneScores = new Map(HEAT_ZONES.map((zone) => [zone.id, zone.heatExposure.score]))
+type GraphEdge = {
+  to: number
+  meters: number
+  exposure: number
+  coordinates: RouteCoordinate[]
+}
+
+// ---------------------------------------------------------------------------
+// Graph, built once from the baked network.
+// ---------------------------------------------------------------------------
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+let cachedAdjacency: GraphEdge[][] | null = null
+
+/** Built on first use: scoring every segment is a one-off cost. */
+function graph() {
+  if (cachedAdjacency) return cachedAdjacency
+  const adjacency: GraphEdge[][] = WALK_NODES.map(() => [])
+  for (const [from, to, meters, greenFraction, highway, coordinates] of WALK_EDGES) {
+    const exposure = segmentExposure(coordinates, greenFraction, highway)
+    adjacency[from].push({ to, meters, exposure, coordinates })
+    adjacency[to].push({ to: from, meters, exposure, coordinates: [...coordinates].reverse() })
+  }
+  cachedAdjacency = adjacency
+  return adjacency
+}
+
+/** POI ids from the trip planner, snapped onto the walking network. */
+const snappedPoiNodes = new Map(
+  ROUTE_NODES.map((node) => [node.id, nearestWalkNode(node.coordinate)] as const),
+)
+const poiCoordinates = new Map(ROUTE_NODES.map((node) => [node.id, node.coordinate] as const))
 
 export function planRoutes(fromId: string, toId: string): RouteComparison | null {
   if (fromId === toId) return null
+  const from = poiCoordinates.get(fromId)
+  const to = poiCoordinates.get(toId)
+  const source = snappedPoiNodes.get(fromId)
+  const target = snappedPoiNodes.get(toId)
+  if (!from || !to || source === undefined || target === undefined) return null
+  const comparison = compareRoutes(source, target)
+  if (!comparison) return null
+  return {
+    ...comparison,
+    fastest: withEndpoints(comparison.fastest, from, to),
+    heatWise: withEndpoints(comparison.heatWise, from, to),
+  }
+}
 
-  const paths = findPaths(fromId, toId)
-  if (paths.length === 0) return null
+/** Re-plans both routes from an arbitrary position (a walker mid-trip) to a
+ *  planner POI, so navigation can reassess what is still ahead of the walker. */
+export function planRoutesFrom(coordinate: RouteCoordinate, toId: string): RouteComparison | null {
+  const to = poiCoordinates.get(toId)
+  const target = snappedPoiNodes.get(toId)
+  if (!to || target === undefined) return null
+  const comparison = compareRoutes(nearestWalkNode(coordinate), target)
+  if (!comparison) return null
+  return {
+    ...comparison,
+    fastest: withEndpoints(comparison.fastest, coordinate, to),
+    heatWise: withEndpoints(comparison.heatWise, coordinate, to),
+  }
+}
 
-  const routes = paths.map(buildRoute)
-  const fastest = routes.reduce((best, route) =>
-    route.distanceMeters < best.distanceMeters ? route : best,
-  )
-  const timeLimit = fastest.distanceMeters * MAX_HEATWISE_TIME_MULTIPLIER
-  const candidates = routes.filter((route) => route.distanceMeters <= timeLimit)
-  const heatWise = candidates.reduce((best, route) => {
-    if (route.exposure < best.exposure) return route
-    if (route.exposure === best.exposure && route.distanceMeters < best.distanceMeters) return route
-    return best
+/** Distance-weighted exposure of the part of `route` from `fromIndex` onwards,
+ *  i.e. what the walker is still going to be exposed to. */
+export function remainingExposure(route: PlannedRoute, fromIndex: number): number | null {
+  const ahead = route.segments.slice(Math.max(0, fromIndex))
+  const meters = ahead.reduce((total, segment) => total + segment.meters, 0)
+  if (meters <= 0) return null
+  return ahead.reduce((total, segment) => total + segment.meters * segment.exposure, 0) / meters
+}
+
+/** Adds the short walk between the door and the nearest network node, so the
+ *  drawn line reaches the pins instead of stopping at the snapped node. */
+function withEndpoints(route: PlannedRoute, from: RouteCoordinate, to: RouteCoordinate): PlannedRoute {
+  const coordinates = [from, ...route.coordinates, to]
+  const head = metersBetween(from, route.coordinates[0])
+  const tail = metersBetween(route.coordinates[route.coordinates.length - 1], to)
+  const distanceMeters = route.distanceMeters + Math.round(head + tail)
+  const segments = [
+    { meters: head, exposure: route.segments[0]?.exposure ?? route.exposure },
+    ...route.segments,
+    { meters: tail, exposure: route.segments[route.segments.length - 1]?.exposure ?? route.exposure },
+  ]
+  return {
+    ...route,
+    coordinates,
+    segments,
+    distanceMeters,
+    walkingMinutes: Math.max(1, Math.round(distanceMeters / WALKING_SPEED_METERS_PER_MINUTE)),
+  }
+}
+
+function compareRoutes(source: number, target: number): RouteComparison | null {
+  if (source === target) return null
+  const fastest = search(source, target, 0)
+  if (!fastest) return null
+
+  const distanceLimit = fastest.distanceMeters * MAX_COOL_DETOUR_MULTIPLIER
+  const heatWise = HEAT_WEIGHTS.reduce((best, heatWeight) => {
+    const candidate = search(source, target, heatWeight)
+    if (!candidate || candidate.distanceMeters > distanceLimit) return best
+    if (candidate.exposure > fastest.exposure - MIN_EXPOSURE_GAIN) return best
+    return candidate.exposure < best.exposure ? candidate : best
   }, fastest)
+
   const exposureReduction =
-    heatWise.exposure < fastest.exposure && fastest.exposure > 0
+    heatWise !== fastest && fastest.exposure > 0
       ? Math.round(((fastest.exposure - heatWise.exposure) / fastest.exposure) * 100)
       : null
 
   return { fastest, heatWise, exposureReduction }
 }
 
-function findPaths(fromId: string, toId: string) {
-  const traversals = new Map<string, Traversal[]>()
-  for (const edge of ROUTE_EDGES) {
-    const forward = { edge, from: edge.from, to: edge.to }
-    const reverse = { edge, from: edge.to, to: edge.from }
-    traversals.set(edge.from, [...(traversals.get(edge.from) ?? []), forward])
-    traversals.set(edge.to, [...(traversals.get(edge.to) ?? []), reverse])
+/** Dijkstra over the walking network. `heatWeight` of 0 is the fastest route. */
+function search(source: number, target: number, heatWeight: number): PlannedRoute | null {
+  const adjacency = graph()
+  const best = new Float64Array(WALK_NODES.length).fill(Number.POSITIVE_INFINITY)
+  const cameFrom = new Map<number, { node: number; edge: GraphEdge }>()
+  const queue = new MinHeap()
+  best[source] = 0
+  queue.push(source, 0)
+
+  while (queue.size > 0) {
+    const { node, cost } = queue.pop()
+    if (cost > best[node]) continue
+    if (node === target) break
+    for (const edge of adjacency[node]) {
+      const next =
+        cost + edge.meters * (1 + (heatWeight * Math.max(0, edge.exposure - COMFORT_EXPOSURE)) / 100)
+      if (next >= best[edge.to]) continue
+      best[edge.to] = next
+      cameFrom.set(edge.to, { node, edge })
+      queue.push(edge.to, next)
+    }
   }
 
-  const paths: Traversal[][] = []
-  const walk = (nodeId: string, visited: Set<string>, path: Traversal[]) => {
-    if (nodeId === toId) {
-      paths.push(path)
-      return
-    }
-    for (const traversal of traversals.get(nodeId) ?? []) {
-      if (visited.has(traversal.to) || path.length >= ROUTE_NODES.length - 1) continue
-      walk(traversal.to, new Set([...visited, traversal.to]), [...path, traversal])
-    }
+  if (!Number.isFinite(best[target])) return null
+
+  const traversals: GraphEdge[] = []
+  const nodeIds: number[] = [target]
+  let current = target
+  while (current !== source) {
+    const step = cameFrom.get(current)
+    if (!step) return null
+    traversals.push(step.edge)
+    current = step.node
+    nodeIds.push(current)
   }
-  walk(fromId, new Set([fromId]), [])
-  return paths
+  traversals.reverse()
+  nodeIds.reverse()
+
+  return buildRoute(traversals, nodeIds)
 }
 
-function buildRoute(path: Traversal[]): PlannedRoute {
-  const coordinates = path.reduce<RouteCoordinate[]>((result, traversal, index) => {
-    const points = traversal.from === traversal.edge.from ? traversal.edge.coordinates : [...traversal.edge.coordinates].reverse()
-    return index === 0 ? [...points] : [...result, ...points.slice(1)]
-  }, [])
-  const distanceMeters = path.reduce((total, traversal) => total + traversal.edge.distanceMeters, 0)
-  const weightedExposure = path.reduce(
-    (total, traversal) => total + traversal.edge.distanceMeters * edgeExposure(traversal.edge),
-    0,
+function buildRoute(traversals: GraphEdge[], nodeIds: number[]): PlannedRoute {
+  const coordinates = traversals.reduce<RouteCoordinate[]>(
+    (result, edge, index) => (index === 0 ? [...edge.coordinates] : [...result, ...edge.coordinates.slice(1)]),
+    [],
   )
+  const segments = traversals.flatMap((edge) =>
+    edge.coordinates.slice(1).map((coordinate, index) => ({
+      meters: metersBetween(edge.coordinates[index], coordinate),
+      exposure: edge.exposure,
+    })),
+  )
+  const distanceMeters = traversals.reduce((total, edge) => total + edge.meters, 0)
+  const weightedExposure = traversals.reduce((total, edge) => total + edge.meters * edge.exposure, 0)
 
   return {
-    nodeIds: [path[0]?.from, ...path.map((traversal) => traversal.to)].filter(Boolean),
+    nodeIds: nodeIds.map(String),
     coordinates,
-    distanceMeters,
+    segments,
+    distanceMeters: Math.round(distanceMeters),
     walkingMinutes: Math.max(1, Math.round(distanceMeters / WALKING_SPEED_METERS_PER_MINUTE)),
-    exposure: Math.round(weightedExposure / distanceMeters),
+    exposure: distanceMeters > 0 ? Math.round(weightedExposure / distanceMeters) : 0,
   }
 }
 
-function edgeExposure(edge: RouteEdge) {
-  const scores = edge.heatZoneIds.map((zoneId) => zoneScores.get(zoneId)).filter((score): score is number => score !== undefined)
-  return scores.length > 0 ? scores.reduce((total, score) => total + score, 0) / scores.length : 0
+// ---------------------------------------------------------------------------
+// Segment exposure
+// ---------------------------------------------------------------------------
+
+/** Greenery/shade shifts applied to the surrounding zone factors at 100% cover. */
+const GREEN_FACTOR_SHIFT = {
+  shadePct: 38,
+  vegetationPct: 45,
+  solarExposurePct: -26,
+  temperatureC: -1.4,
+} as const
+
+/** Wide arterials are exposed; footpaths and alleys catch more shade. */
+const HIGHWAY_SHADE_BONUS: Record<string, number> = {
+  footway: 8,
+  path: 8,
+  steps: 10,
+  pedestrian: 6,
+  living_street: 5,
+  service: 4,
+  residential: 3,
+  track: 0,
+  unclassified: 0,
+  tertiary: -2,
+  secondary: -5,
+  primary: -8,
+  trunk: -10,
+}
+
+function segmentExposure(coordinates: RouteCoordinate[], greenFraction: number, highway: string) {
+  const midpoint = coordinates[Math.floor(coordinates.length / 2)] ?? coordinates[0]
+  const zoneFactors = interpolatedZoneFactors(midpoint)
+  const shadeBonus = HIGHWAY_SHADE_BONUS[highway] ?? 0
+
+  return calculateHeatExposure({
+    ...zoneFactors,
+    shadePct: clamp(zoneFactors.shadePct + GREEN_FACTOR_SHIFT.shadePct * greenFraction + shadeBonus, 0, 100),
+    vegetationPct: clamp(zoneFactors.vegetationPct + GREEN_FACTOR_SHIFT.vegetationPct * greenFraction, 0, 100),
+    solarExposurePct: clamp(
+      zoneFactors.solarExposurePct + GREEN_FACTOR_SHIFT.solarExposurePct * greenFraction - shadeBonus * 0.5,
+      0,
+      100,
+    ),
+    temperatureC: zoneFactors.temperatureC + GREEN_FACTOR_SHIFT.temperatureC * greenFraction,
+  }).score
+}
+
+/** Inverse-distance weighting of the nearest simulated zones, so exposure
+ *  varies smoothly along a street instead of snapping at hex borders. */
+function interpolatedZoneFactors(coordinate: RouteCoordinate): HeatZoneFactors {
+  const neighbours = HEAT_ZONES.map((zone) => ({
+    zone,
+    distance: Math.max(1e-9, squaredDistance(coordinate, [zone.center.lng, zone.center.lat])),
+  }))
+    .sort((first, second) => first.distance - second.distance)
+    .slice(0, 3)
+
+  const totalWeight = neighbours.reduce((total, neighbour) => total + 1 / neighbour.distance, 0)
+  const weighted = (pick: (factors: HeatZoneFactors) => number) =>
+    neighbours.reduce((total, neighbour) => total + pick(neighbour.zone.factors) / neighbour.distance, 0) /
+    totalWeight
+
+  return {
+    temperatureC: weighted((factors) => factors.temperatureC),
+    humidityPct: weighted((factors) => factors.humidityPct),
+    solarExposurePct: weighted((factors) => factors.solarExposurePct),
+    shadePct: weighted((factors) => factors.shadePct),
+    vegetationPct: weighted((factors) => factors.vegetationPct),
+    pedestrianDensityPct: weighted((factors) => factors.pedestrianDensityPct),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+export function nearestWalkNode(coordinate: RouteCoordinate) {
+  let nearest = 0
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (let index = 0; index < WALK_NODES.length; index += 1) {
+    const distance = squaredDistance(coordinate, WALK_NODES[index])
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearest = index
+    }
+  }
+  return nearest
+}
+
+function metersBetween(first: RouteCoordinate, second: RouteCoordinate) {
+  const longitude = ((second[0] - first[0]) * Math.PI) / 180 * Math.cos((first[1] * Math.PI) / 180)
+  const latitude = ((second[1] - first[1]) * Math.PI) / 180
+  return 6_371_000 * Math.hypot(longitude, latitude)
+}
+
+function squaredDistance(first: RouteCoordinate, second: RouteCoordinate) {
+  const longitude = (first[0] - second[0]) * Math.cos((first[1] * Math.PI) / 180)
+  const latitude = first[1] - second[1]
+  return longitude * longitude + latitude * latitude
+}
+
+/** Binary heap keyed on cost — a plain array sort is too slow for this graph. */
+class MinHeap {
+  private nodes: number[] = []
+  private costs: number[] = []
+
+  get size() {
+    return this.nodes.length
+  }
+
+  push(node: number, cost: number) {
+    this.nodes.push(node)
+    this.costs.push(cost)
+    let index = this.nodes.length - 1
+    while (index > 0) {
+      const parent = (index - 1) >> 1
+      if (this.costs[parent] <= this.costs[index]) break
+      this.swap(parent, index)
+      index = parent
+    }
+  }
+
+  pop() {
+    const node = this.nodes[0]
+    const cost = this.costs[0]
+    const lastNode = this.nodes.pop() as number
+    const lastCost = this.costs.pop() as number
+    if (this.nodes.length > 0) {
+      this.nodes[0] = lastNode
+      this.costs[0] = lastCost
+      let index = 0
+      while (true) {
+        const left = index * 2 + 1
+        const right = left + 1
+        let smallest = index
+        if (left < this.costs.length && this.costs[left] < this.costs[smallest]) smallest = left
+        if (right < this.costs.length && this.costs[right] < this.costs[smallest]) smallest = right
+        if (smallest === index) break
+        this.swap(smallest, index)
+        index = smallest
+      }
+    }
+    return { node, cost }
+  }
+
+  private swap(first: number, second: number) {
+    ;[this.nodes[first], this.nodes[second]] = [this.nodes[second], this.nodes[first]]
+    ;[this.costs[first], this.costs[second]] = [this.costs[second], this.costs[first]]
+  }
 }

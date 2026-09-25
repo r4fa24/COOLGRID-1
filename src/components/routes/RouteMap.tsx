@@ -2,8 +2,9 @@ import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'map
 import type { GeoJSONSource, Map as MapInstance } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import { ROUTE_EDGES, type RouteNode } from '../../data/routeNetwork'
-import type { PlannedRoute, RouteComparison } from '../../lib/routePlanning'
+import type { RouteNode } from '../../data/routeNetwork'
+import { WALK_EDGES } from '../../data/walkNetwork'
+import { planRoutesFrom, remainingExposure, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
 import '../map/maplibreWorker'
 import { BASEMAP_STYLE_URL } from '../map/mapStyle'
 
@@ -22,6 +23,16 @@ type RouteMapProps = {
 type RouteCoordinate = [number, number]
 
 const ROUTES_SOURCE = 'simulated-routes'
+const NETWORK_SOURCE = 'walking-network'
+/** How often navigation re-plans the trip still ahead of the walker. */
+const REASSESS_INTERVAL_MS = 2_000
+/** Share of the remaining exposure a re-planned alternative must save, plus a
+ *  floor in score points, before it is offered. Relative so the same rule fits
+ *  a walk started on the fastest route and one already on the CoolGrid route. */
+const MIN_REROUTE_EXPOSURE_RELIEF = 4
+const MIN_REROUTE_EXPOSURE_GAIN = 1.5
+/** An alternative sharing more of the path ahead than this is the same walk. */
+const MAX_SHARED_FRACTION = 0.8
 
 export function RouteMap({ comparison, from, to, selectedRoute, currentLocation, startRequest, onReroute, generatedRoute, onGeneratedRoute }: RouteMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -29,7 +40,7 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
   const markersRef = useRef<Marker[]>([])
   const selectedRouteRef = useRef(selectedRoute)
   const rerouteActionsRef = useRef<{ takeCoolerRoute: () => void; keepCurrentRoute: () => void } | null>(null)
-  const [showReroutePrompt, setShowReroutePrompt] = useState(false)
+  const [rerouteOffer, setRerouteOffer] = useState<{ exposureReduction: number } | null>(null)
 
   useEffect(() => {
     selectedRouteRef.current = selectedRoute
@@ -47,7 +58,11 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
     map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right')
     map.on('load', () => {
       map.addSource(ROUTES_SOURCE, { type: 'geojson', data: emptyFeatureCollection() })
-      map.addLayer({ id: 'simulated-route-network', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'network'], paint: { 'line-color': '#94a3b8', 'line-width': 1.5, 'line-opacity': 0.45, 'line-dasharray': [2, 2] } })
+      map.addSource(NETWORK_SOURCE, {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: WALK_EDGES.map((edge) => lineFeature(edge[5], 'network')) },
+      })
+      map.addLayer({ id: 'walking-network', type: 'line', source: NETWORK_SOURCE, minzoom: 13.5, paint: { 'line-color': '#94a3b8', 'line-width': 1, 'line-opacity': 0.22 } })
       map.addLayer({ id: 'fastest-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'fastest'], paint: { 'line-color': '#fb7185', 'line-width': 5, 'line-opacity': 0.9 } })
       map.addLayer({ id: 'heatwise-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'heatwise'], paint: { 'line-color': '#14b8a6', 'line-width': 5, 'line-opacity': 0.95 } })
       map.addLayer({ id: 'generated-cooler-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'generated-cooler'], paint: { 'line-color': '#2dd4bf', 'line-width': 7, 'line-opacity': 0.98 } })
@@ -69,19 +84,25 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
 
   useEffect(() => {
     const map = mapRef.current
-    const route = comparison?.[selectedRouteRef.current === 'fastest' ? 'fastest' : 'heatWise']
-    const coordinates = routeCoordinates(route?.coordinates ?? [], currentLocation)
-    if (!map || startRequest === 0 || coordinates.length < 2) return
+    const selected = comparison?.[selectedRouteRef.current === 'fastest' ? 'fastest' : 'heatWise']
+    const route = selected ? withLeadIn(selected, currentLocation) : null
+    const coordinates = route?.coordinates ?? []
+    if (!map || !route || startRequest === 0 || coordinates.length < 2) return
 
     let animationFrame = 0
     let progressMarker: Marker | undefined
     let routeCoordinatesForAnimation = coordinates
+    /** The route the walker is on right now — the reference every reassessment
+     *  is measured against, whichever option they started with. */
+    let followedRoute = route
     let routeProgress = 0
     let startedAt = performance.now()
     let animationDuration = 10_000
     let paused = false
-    let promptShown = false
+    let declined = false
     let cleanedUp = false
+    let lastAssessedAt = 0
+    let offeredRoute: PlannedRoute | null = null
     const markerElement = document.createElement('div')
     markerElement.className = 'route-progress-marker'
     markerElement.setAttribute('aria-label', 'Route progress')
@@ -90,6 +111,8 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
     const startAnimation = () => {
       if (!map.isStyleLoaded()) return
       progressMarker = new Marker({ element: markerElement }).setLngLat(coordinates[0]).addTo(map)
+      startedAt = performance.now()
+      lastAssessedAt = startedAt
 
       const animate = (timestamp: number) => {
         if (cleanedUp || paused) return
@@ -105,41 +128,49 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
           start[0] + (end[0] - start[0]) * segmentProgress,
           start[1] + (end[1] - start[1]) * segmentProgress,
         ])
-        if (progress >= 0.45 && progress < 0.55 && !promptShown) {
-          promptShown = true
-          paused = true
-          setShowReroutePrompt(true)
+        if (!declined && progress < 0.9 && timestamp - lastAssessedAt >= REASSESS_INTERVAL_MS) {
+          lastAssessedAt = timestamp
+          const offer = coolerRouteAhead(
+            progressMarker?.getLngLat(),
+            to?.id,
+            routeCoordinatesForAnimation.slice(segmentIndex),
+            remainingExposure(followedRoute, segmentIndex) ?? 0,
+          )
+          if (offer) {
+            offeredRoute = offer.route
+            paused = true
+            setRerouteOffer({ exposureReduction: offer.exposureReduction })
+            return
+          }
         }
         if (progress < 1) animationFrame = requestAnimationFrame(animate)
       }
 
       rerouteActionsRef.current = {
         takeCoolerRoute: () => {
-          if (cleanedUp || !progressMarker) return
-          const currentPosition = progressMarker.getLngLat()
-          const generated = createGeneratedCoolerRoute(
-            comparison,
-            routeCoordinatesForAnimation,
-            [currentPosition.lng, currentPosition.lat],
-          )
-          if (!generated) return
-          const remainingCoordinates = generated.coordinates
+          if (cleanedUp || !progressMarker || !offeredRoute) return
+          const remainingCoordinates = offeredRoute.coordinates
           if (remainingCoordinates.length < 2) return
           routeCoordinatesForAnimation = remainingCoordinates
+          followedRoute = offeredRoute
           progressMarker.setLngLat(remainingCoordinates[0])
           animationDuration = Math.max(2_500, 10_000 * (1 - routeProgress))
           startedAt = performance.now()
+          lastAssessedAt = performance.now()
           paused = false
-          setShowReroutePrompt(false)
-          onGeneratedRoute(generated)
+          setRerouteOffer(null)
+          onGeneratedRoute(offeredRoute)
           onReroute('coolGrid')
+          offeredRoute = null
           animationFrame = requestAnimationFrame(animate)
         },
         keepCurrentRoute: () => {
           if (cleanedUp) return
+          declined = true
+          offeredRoute = null
           startedAt = performance.now() - routeProgress * animationDuration
           paused = false
-          setShowReroutePrompt(false)
+          setRerouteOffer(null)
           animationFrame = requestAnimationFrame(animate)
         },
       }
@@ -156,16 +187,18 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
       cancelAnimationFrame(animationFrame)
       rerouteActionsRef.current = null
       progressMarker?.remove()
-      setShowReroutePrompt(false)
+      setRerouteOffer(null)
     }
-  }, [comparison, currentLocation, startRequest, onReroute, onGeneratedRoute])
+  }, [comparison, currentLocation, startRequest, to, onReroute, onGeneratedRoute])
 
   return (
     <div ref={containerRef} className="relative h-full min-h-96 w-full">
-      {showReroutePrompt && (
+      {rerouteOffer && (
         <div className="absolute top-4 left-1/2 z-10 w-[min(20rem,calc(100%-2rem))] -translate-x-1/2 rounded-2xl bg-slate-900/95 px-4 py-3 text-white shadow-lg backdrop-blur-sm">
-          <p className="text-sm font-semibold">☀️ Cooler route found</p>
-          <p className="mt-0.5 text-xs text-slate-300">Would you like to take it?</p>
+          <p className="text-sm font-semibold">☀️ Cooler route available</p>
+          <p className="mt-0.5 text-xs text-slate-300">
+            About {rerouteOffer.exposureReduction}% lower estimated exposure for the rest of the trip.
+          </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
@@ -201,7 +234,6 @@ function updateMap(
   const source = map.getSource(ROUTES_SOURCE) as GeoJSONSource | undefined
   if (!source) return
   const features = [
-    ...ROUTE_EDGES.map((edge) => lineFeature(edge.coordinates, 'network')),
     ...(comparison
       ? [
           lineFeature(routeCoordinates(comparison.fastest.coordinates, currentLocation), 'fastest'),
@@ -258,66 +290,42 @@ function updateMap(
   }
 }
 
-function nearestCoordinateIndex(coordinates: RouteCoordinate[], target: RouteCoordinate) {
-  return coordinates.reduce((nearestIndex, coordinate, index) => {
-    const nearestDistance = coordinateDistance(coordinates[nearestIndex] ?? coordinates[0], target)
-    return coordinateDistance(coordinate, target) < nearestDistance ? index : nearestIndex
-  }, 0)
-}
-
-function coordinateDistance(first: RouteCoordinate, second: RouteCoordinate) {
-  return Math.hypot(first[0] - second[0], first[1] - second[1])
-}
-
-function createGeneratedCoolerRoute(
-  comparison: RouteComparison | null,
-  currentCoordinates: RouteCoordinate[],
-  currentPosition: RouteCoordinate,
+/** Reassessment done while navigating: re-plans the trip still ahead of the
+ *  walker and reports a cooler alternative only when it is meaningfully cooler
+ *  than the walk they have left and actually leaves the path being walked. The
+ *  comparison is against the route currently being followed, so it works the
+ *  same whether the walker started on the fastest or the CoolGrid route. */
+function coolerRouteAhead(
+  position: { lng: number; lat: number } | undefined,
+  toId: string | undefined,
+  pathAhead: RouteCoordinate[],
+  currentExposure: number,
 ) {
-  if (!comparison || comparison.heatWise.exposure >= comparison.fastest.exposure) return null
-  const currentRoute = currentCoordinates.slice(nearestCoordinateIndex(currentCoordinates, currentPosition))
-  const coolerRoute = comparison.heatWise.coordinates
-  const sourceRoute =
-    coordinateDistance(
-      coolerRoute[Math.floor(coolerRoute.length / 2)] ?? coolerRoute[0],
-      currentRoute[Math.floor(currentRoute.length / 2)] ?? currentRoute[0],
-    ) > 0.00001
-      ? coolerRoute
-      : comparison.fastest.coordinates
-  if (sourceRoute.length < 2 || currentRoute.length < 2) return null
-  const sourceStart = nearestCoordinateIndex(sourceRoute, currentPosition)
-  const sourceRemainder = sourceRoute.slice(sourceStart)
-  if (sourceRemainder.length < 2) return null
-
-  const points: RouteCoordinate[] = [currentPosition]
-  const sampleCount = Math.max(4, Math.min(8, Math.max(currentRoute.length, sourceRemainder.length)))
-  for (let index = 1; index < sampleCount; index += 1) {
-    const progress = index / (sampleCount - 1)
-    const currentPoint = interpolateCoordinate(currentRoute, progress)
-    const coolerPoint = interpolateCoordinate(sourceRemainder, progress)
-    const divergence = Math.sin(progress * Math.PI) * 0.7
-    points.push([
-      currentPoint[0] + (coolerPoint[0] - currentPoint[0]) * divergence,
-      currentPoint[1] + (coolerPoint[1] - currentPoint[1]) * divergence,
-    ])
-  }
-  points[points.length - 1] = sourceRemainder[sourceRemainder.length - 1]
-  return {
-    nodeIds: comparison.heatWise.nodeIds,
-    coordinates: points,
-    distanceMeters: Math.round(comparison.heatWise.distanceMeters * 1.08),
-    walkingMinutes: Math.max(1, Math.round((comparison.heatWise.distanceMeters * 1.08) / 80)),
-    exposure: comparison.heatWise.exposure,
-  } satisfies PlannedRoute
+  if (!position || !toId || currentExposure <= 0) return null
+  const ahead = planRoutesFrom([position.lng, position.lat], toId)
+  if (!ahead) return null
+  const candidate = ahead.heatWise
+  if (candidate.coordinates.length < 2) return null
+  const gain = currentExposure - candidate.exposure
+  const relief = (gain / currentExposure) * 100
+  if (gain < MIN_REROUTE_EXPOSURE_GAIN || relief < MIN_REROUTE_EXPOSURE_RELIEF) return null
+  if (sharedFraction(candidate.coordinates, pathAhead) > MAX_SHARED_FRACTION) return null
+  return { route: candidate, exposureReduction: Math.round(relief) }
 }
 
-function interpolateCoordinate(coordinates: RouteCoordinate[], progress: number): RouteCoordinate {
-  const position = progress * (coordinates.length - 1)
-  const index = Math.min(coordinates.length - 2, Math.max(0, Math.floor(position)))
-  const fraction = position - index
-  const start = coordinates[index] ?? coordinates[0]
-  const end = coordinates[index + 1] ?? start
-  return [start[0] + (end[0] - start[0]) * fraction, start[1] + (end[1] - start[1]) * fraction]
+/** The walk starts wherever the walker is, which may be off the planned route. */
+function withLeadIn(route: PlannedRoute, currentLocation: { latitude: number; longitude: number } | null) {
+  if (!currentLocation) return route
+  return {
+    ...route,
+    coordinates: [[currentLocation.longitude, currentLocation.latitude] as RouteCoordinate, ...route.coordinates],
+    segments: [{ meters: 0, exposure: route.segments[0]?.exposure ?? route.exposure }, ...route.segments],
+  }
+}
+
+function sharedFraction(candidate: RouteCoordinate[], walked: RouteCoordinate[]) {
+  const keys = new Set(walked.map((coordinate) => coordinate.join(',')))
+  return candidate.filter((coordinate) => keys.has(coordinate.join(','))).length / candidate.length
 }
 
 function routeCoordinates(
