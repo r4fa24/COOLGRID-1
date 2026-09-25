@@ -85,21 +85,46 @@ function graph() {
 const snappedPoiNodes = new Map(
   ROUTE_NODES.map((node) => [node.id, nearestWalkNode(node.coordinate)] as const),
 )
+const poiCoordinates = new Map(ROUTE_NODES.map((node) => [node.id, node.coordinate] as const))
 
 export function planRoutes(fromId: string, toId: string): RouteComparison | null {
   if (fromId === toId) return null
+  const from = poiCoordinates.get(fromId)
+  const to = poiCoordinates.get(toId)
   const source = snappedPoiNodes.get(fromId)
   const target = snappedPoiNodes.get(toId)
-  if (source === undefined || target === undefined) return null
-  return compareRoutes(source, target)
+  if (!from || !to || source === undefined || target === undefined) return null
+  const comparison = compareRoutes(source, target)
+  if (!comparison) return null
+  return {
+    ...comparison,
+    fastest: withEndpoints(comparison.fastest, from, to),
+    heatWise: withEndpoints(comparison.heatWise, from, to),
+  }
 }
 
 /** Cool route from an arbitrary position (a walker mid-trip) to a planner POI. */
 export function planCoolRouteFrom(coordinate: RouteCoordinate, toId: string): PlannedRoute | null {
+  const to = poiCoordinates.get(toId)
   const target = snappedPoiNodes.get(toId)
-  if (target === undefined) return null
+  if (!to || target === undefined) return null
   const comparison = compareRoutes(nearestWalkNode(coordinate), target)
-  return comparison?.heatWise ?? null
+  return comparison ? withEndpoints(comparison.heatWise, coordinate, to) : null
+}
+
+/** Adds the short walk between the door and the nearest network node, so the
+ *  drawn line reaches the pins instead of stopping at the snapped node. */
+function withEndpoints(route: PlannedRoute, from: RouteCoordinate, to: RouteCoordinate): PlannedRoute {
+  const coordinates = [from, ...route.coordinates, to]
+  const distanceMeters =
+    route.distanceMeters +
+    Math.round(metersBetween(from, route.coordinates[0]) + metersBetween(route.coordinates[route.coordinates.length - 1], to))
+  return {
+    ...route,
+    coordinates,
+    distanceMeters,
+    walkingMinutes: Math.max(1, Math.round(distanceMeters / WALKING_SPEED_METERS_PER_MINUTE)),
+  }
 }
 
 function compareRoutes(source: number, target: number): RouteComparison | null {
@@ -268,6 +293,12 @@ export function nearestWalkNode(coordinate: RouteCoordinate) {
     }
   }
   return nearest
+}
+
+function metersBetween(first: RouteCoordinate, second: RouteCoordinate) {
+  const longitude = ((second[0] - first[0]) * Math.PI) / 180 * Math.cos((first[1] * Math.PI) / 180)
+  const latitude = ((second[1] - first[1]) * Math.PI) / 180
+  return 6_371_000 * Math.hypot(longitude, latitude)
 }
 
 function squaredDistance(first: RouteCoordinate, second: RouteCoordinate) {

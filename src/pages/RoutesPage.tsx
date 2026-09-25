@@ -201,8 +201,8 @@ function WalkingDirections({
 
       {steps.length > 0 ? (
         <ol className="mt-4 space-y-3">
-          {steps.map(({ icon: Icon, label, distance }) => (
-            <li key={`${label}-${distance}`} className="flex items-center gap-3 text-sm text-slate-600">
+          {steps.map(({ icon: Icon, label, distance }, index) => (
+            <li key={`${index}-${label}`} className="flex items-center gap-3 text-sm text-slate-600">
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-400/15 text-teal-700">
                 <Icon className="h-4 w-4" />
               </span>
@@ -242,26 +242,35 @@ function RouteChoice({
   )
 }
 
+/** Turns shorter than this are treated as the street bending, not an
+ *  instruction, so a route of hundreds of OSM vertices reads as a few steps. */
+const MIN_STEP_METERS = 60
+
 function buildWalkingSteps(route: PlannedRoute, fromLabel: string, toLabel: string) {
-  const segmentSteps = route.coordinates.slice(0, -1).map((coordinate, index) => {
-    const nextCoordinate = route.coordinates[index + 1]
-    const previousCoordinate = route.coordinates[index - 1]
-    const distance = Math.max(1, Math.round(distanceBetween(coordinate, nextCoordinate)))
-    const direction = previousCoordinate
-      ? turnDirection(previousCoordinate, coordinate, nextCoordinate)
-      : 'straight'
-
-    return {
-      icon: direction === 'left' ? CornerUpLeft : direction === 'right' ? CornerUpRight : ArrowUp,
-      label: index === 0 ? `Start at ${fromLabel}` : direction === 'straight' ? 'Continue straight' : `Turn ${direction}`,
-      distance: index === 0 ? null : `${distance} m`,
-    }
-  })
-
-  return [
-    ...segmentSteps,
-    { icon: MapPinCheck, label: `Arrive at ${toLabel}`, distance: null },
+  const steps: { icon: typeof ArrowUp; label: string; distance: string | null }[] = [
+    { icon: ArrowUp, label: `Start at ${fromLabel}`, distance: null },
   ]
+  let walked = 0
+
+  for (let index = 1; index < route.coordinates.length; index += 1) {
+    walked += distanceBetween(route.coordinates[index - 1], route.coordinates[index])
+    const nextCoordinate = route.coordinates[index + 1]
+    if (!nextCoordinate || walked < MIN_STEP_METERS) continue
+    const direction = turnDirection(route.coordinates[index - 1], route.coordinates[index], nextCoordinate)
+    if (direction === 'straight') continue
+    steps.push({
+      icon: direction === 'left' ? CornerUpLeft : CornerUpRight,
+      label: `Turn ${direction}`,
+      distance: `${Math.round(walked)} m`,
+    })
+    walked = 0
+  }
+
+  if (walked >= 1) {
+    steps.push({ icon: ArrowUp, label: 'Continue straight', distance: `${Math.round(walked)} m` })
+  }
+  steps.push({ icon: MapPinCheck, label: `Arrive at ${toLabel}`, distance: null })
+  return steps
 }
 
 function turnDirection(

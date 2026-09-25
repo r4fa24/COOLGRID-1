@@ -262,8 +262,7 @@ function updateMap(
 /** Re-plans the cool route from wherever the walker currently stands. */
 function coolRouteFromHere(currentPosition: RouteCoordinate, toId: string): PlannedRoute | null {
   const replanned = planCoolRouteFrom(currentPosition, toId)
-  if (!replanned || replanned.coordinates.length < 2) return null
-  return { ...replanned, coordinates: [currentPosition, ...replanned.coordinates] }
+  return replanned && replanned.coordinates.length >= 2 ? replanned : null
 }
 
 function routeCoordinates(
