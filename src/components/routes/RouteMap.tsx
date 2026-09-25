@@ -4,7 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { RouteNode } from '../../data/routeNetwork'
 import { WALK_EDGES } from '../../data/walkNetwork'
-import { planRoutesFrom, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
+import { planRoutesFrom, remainingExposure, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
 import '../map/maplibreWorker'
 import { BASEMAP_STYLE_URL } from '../map/mapStyle'
 
@@ -26,8 +26,11 @@ const ROUTES_SOURCE = 'simulated-routes'
 const NETWORK_SOURCE = 'walking-network'
 /** How often navigation re-plans the trip still ahead of the walker. */
 const REASSESS_INTERVAL_MS = 2_000
-/** Score points a re-planned alternative must save before it is offered. */
-const MIN_REROUTE_EXPOSURE_GAIN = 3
+/** Share of the remaining exposure a re-planned alternative must save, plus a
+ *  floor in score points, before it is offered. Relative so the same rule fits
+ *  a walk started on the fastest route and one already on the CoolGrid route. */
+const MIN_REROUTE_EXPOSURE_RELIEF = 4
+const MIN_REROUTE_EXPOSURE_GAIN = 1.5
 /** An alternative sharing more of the path ahead than this is the same walk. */
 const MAX_SHARED_FRACTION = 0.8
 
@@ -81,13 +84,17 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
 
   useEffect(() => {
     const map = mapRef.current
-    const route = comparison?.[selectedRouteRef.current === 'fastest' ? 'fastest' : 'heatWise']
-    const coordinates = routeCoordinates(route?.coordinates ?? [], currentLocation)
-    if (!map || startRequest === 0 || coordinates.length < 2) return
+    const selected = comparison?.[selectedRouteRef.current === 'fastest' ? 'fastest' : 'heatWise']
+    const route = selected ? withLeadIn(selected, currentLocation) : null
+    const coordinates = route?.coordinates ?? []
+    if (!map || !route || startRequest === 0 || coordinates.length < 2) return
 
     let animationFrame = 0
     let progressMarker: Marker | undefined
     let routeCoordinatesForAnimation = coordinates
+    /** The route the walker is on right now — the reference every reassessment
+     *  is measured against, whichever option they started with. */
+    let followedRoute = route
     let routeProgress = 0
     let startedAt = performance.now()
     let animationDuration = 10_000
@@ -127,6 +134,7 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
             progressMarker?.getLngLat(),
             to?.id,
             routeCoordinatesForAnimation.slice(segmentIndex),
+            remainingExposure(followedRoute, segmentIndex) ?? 0,
           )
           if (offer) {
             offeredRoute = offer.route
@@ -144,6 +152,7 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
           const remainingCoordinates = offeredRoute.coordinates
           if (remainingCoordinates.length < 2) return
           routeCoordinatesForAnimation = remainingCoordinates
+          followedRoute = offeredRoute
           progressMarker.setLngLat(remainingCoordinates[0])
           animationDuration = Math.max(2_500, 10_000 * (1 - routeProgress))
           startedAt = performance.now()
@@ -283,20 +292,35 @@ function updateMap(
 
 /** Reassessment done while navigating: re-plans the trip still ahead of the
  *  walker and reports a cooler alternative only when it is meaningfully cooler
- *  and actually leaves the path being walked. */
+ *  than the walk they have left and actually leaves the path being walked. The
+ *  comparison is against the route currently being followed, so it works the
+ *  same whether the walker started on the fastest or the CoolGrid route. */
 function coolerRouteAhead(
   position: { lng: number; lat: number } | undefined,
   toId: string | undefined,
   pathAhead: RouteCoordinate[],
+  currentExposure: number,
 ) {
-  if (!position || !toId) return null
+  if (!position || !toId || currentExposure <= 0) return null
   const ahead = planRoutesFrom([position.lng, position.lat], toId)
-  if (!ahead || ahead.exposureReduction === null) return null
-  const { fastest, heatWise } = ahead
-  if (heatWise.coordinates.length < 2) return null
-  if (fastest.exposure - heatWise.exposure < MIN_REROUTE_EXPOSURE_GAIN) return null
-  if (sharedFraction(heatWise.coordinates, pathAhead) > MAX_SHARED_FRACTION) return null
-  return { route: heatWise, exposureReduction: ahead.exposureReduction }
+  if (!ahead) return null
+  const candidate = ahead.heatWise
+  if (candidate.coordinates.length < 2) return null
+  const gain = currentExposure - candidate.exposure
+  const relief = (gain / currentExposure) * 100
+  if (gain < MIN_REROUTE_EXPOSURE_GAIN || relief < MIN_REROUTE_EXPOSURE_RELIEF) return null
+  if (sharedFraction(candidate.coordinates, pathAhead) > MAX_SHARED_FRACTION) return null
+  return { route: candidate, exposureReduction: Math.round(relief) }
+}
+
+/** The walk starts wherever the walker is, which may be off the planned route. */
+function withLeadIn(route: PlannedRoute, currentLocation: { latitude: number; longitude: number } | null) {
+  if (!currentLocation) return route
+  return {
+    ...route,
+    coordinates: [[currentLocation.longitude, currentLocation.latitude] as RouteCoordinate, ...route.coordinates],
+    segments: [{ meters: 0, exposure: route.segments[0]?.exposure ?? route.exposure }, ...route.segments],
+  }
 }
 
 function sharedFraction(candidate: RouteCoordinate[], walked: RouteCoordinate[]) {

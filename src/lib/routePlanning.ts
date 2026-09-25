@@ -42,6 +42,9 @@ const MIN_EXPOSURE_GAIN = 1
 export type PlannedRoute = {
   nodeIds: string[]
   coordinates: RouteCoordinate[]
+  /** Length and exposure of each `coordinates` pair, so navigation can score
+   *  the part of the route a walker still has ahead of them. */
+  segments: { meters: number; exposure: number }[]
   distanceMeters: number
   walkingMinutes: number
   exposure: number
@@ -118,16 +121,31 @@ export function planRoutesFrom(coordinate: RouteCoordinate, toId: string): Route
   }
 }
 
+/** Distance-weighted exposure of the part of `route` from `fromIndex` onwards,
+ *  i.e. what the walker is still going to be exposed to. */
+export function remainingExposure(route: PlannedRoute, fromIndex: number): number | null {
+  const ahead = route.segments.slice(Math.max(0, fromIndex))
+  const meters = ahead.reduce((total, segment) => total + segment.meters, 0)
+  if (meters <= 0) return null
+  return ahead.reduce((total, segment) => total + segment.meters * segment.exposure, 0) / meters
+}
+
 /** Adds the short walk between the door and the nearest network node, so the
  *  drawn line reaches the pins instead of stopping at the snapped node. */
 function withEndpoints(route: PlannedRoute, from: RouteCoordinate, to: RouteCoordinate): PlannedRoute {
   const coordinates = [from, ...route.coordinates, to]
-  const distanceMeters =
-    route.distanceMeters +
-    Math.round(metersBetween(from, route.coordinates[0]) + metersBetween(route.coordinates[route.coordinates.length - 1], to))
+  const head = metersBetween(from, route.coordinates[0])
+  const tail = metersBetween(route.coordinates[route.coordinates.length - 1], to)
+  const distanceMeters = route.distanceMeters + Math.round(head + tail)
+  const segments = [
+    { meters: head, exposure: route.segments[0]?.exposure ?? route.exposure },
+    ...route.segments,
+    { meters: tail, exposure: route.segments[route.segments.length - 1]?.exposure ?? route.exposure },
+  ]
   return {
     ...route,
     coordinates,
+    segments,
     distanceMeters,
     walkingMinutes: Math.max(1, Math.round(distanceMeters / WALKING_SPEED_METERS_PER_MINUTE)),
   }
@@ -200,12 +218,19 @@ function buildRoute(traversals: GraphEdge[], nodeIds: number[]): PlannedRoute {
     (result, edge, index) => (index === 0 ? [...edge.coordinates] : [...result, ...edge.coordinates.slice(1)]),
     [],
   )
+  const segments = traversals.flatMap((edge) =>
+    edge.coordinates.slice(1).map((coordinate, index) => ({
+      meters: metersBetween(edge.coordinates[index], coordinate),
+      exposure: edge.exposure,
+    })),
+  )
   const distanceMeters = traversals.reduce((total, edge) => total + edge.meters, 0)
   const weightedExposure = traversals.reduce((total, edge) => total + edge.meters * edge.exposure, 0)
 
   return {
     nodeIds: nodeIds.map(String),
     coordinates,
+    segments,
     distanceMeters: Math.round(distanceMeters),
     walkingMinutes: Math.max(1, Math.round(distanceMeters / WALKING_SPEED_METERS_PER_MINUTE)),
     exposure: distanceMeters > 0 ? Math.round(weightedExposure / distanceMeters) : 0,
