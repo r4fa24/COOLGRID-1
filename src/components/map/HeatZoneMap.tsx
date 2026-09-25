@@ -197,23 +197,19 @@ export const HeatZoneMap = memo(function HeatZoneMap({
       const previousFeatureId = zoneFeatureId(simulatedZoneRef.current)
       const currentFeatureId = zoneFeatureId(selectedZoneId)
 
-      if (previousFeatureId !== null && simulatedZoneRef.current !== selectedZoneId) {
+      // Only clear state we previously set: MapLibre throws during render when
+      // a keyed removeFeatureState targets a feature that never had state.
+      if (previousFeatureId !== null && (simulatedZoneRef.current !== selectedZoneId || simulatedScore === null)) {
         map.removeFeatureState({ source: SOURCE_ID, id: previousFeatureId }, 'simulatedIntensity')
+        simulatedZoneRef.current = null
       }
 
-      if (currentFeatureId !== null) {
-        const feature = { source: SOURCE_ID, id: currentFeatureId }
-        if (simulatedScore === null) {
-          map.removeFeatureState(feature, 'simulatedIntensity')
-          simulatedZoneRef.current = null
-        } else {
-          map.setFeatureState(feature, {
-            simulatedIntensity: Math.min(1, Math.max(0, simulatedScore / 100)),
-          })
-          simulatedZoneRef.current = selectedZoneId
-        }
-      } else {
-        simulatedZoneRef.current = null
+      if (currentFeatureId !== null && simulatedScore !== null) {
+        map.setFeatureState(
+          { source: SOURCE_ID, id: currentFeatureId },
+          { simulatedIntensity: Math.min(1, Math.max(0, simulatedScore / 100)) },
+        )
+        simulatedZoneRef.current = selectedZoneId
       }
     }
 
