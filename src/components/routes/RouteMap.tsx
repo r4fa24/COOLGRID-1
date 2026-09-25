@@ -4,7 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { RouteNode } from '../../data/routeNetwork'
 import { WALK_EDGES } from '../../data/walkNetwork'
-import { planCoolRouteFrom, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
+import { planRoutesFrom, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
 import '../map/maplibreWorker'
 import { BASEMAP_STYLE_URL } from '../map/mapStyle'
 
@@ -24,6 +24,12 @@ type RouteCoordinate = [number, number]
 
 const ROUTES_SOURCE = 'simulated-routes'
 const NETWORK_SOURCE = 'walking-network'
+/** How often navigation re-plans the trip still ahead of the walker. */
+const REASSESS_INTERVAL_MS = 2_000
+/** Score points a re-planned alternative must save before it is offered. */
+const MIN_REROUTE_EXPOSURE_GAIN = 3
+/** An alternative sharing more of the path ahead than this is the same walk. */
+const MAX_SHARED_FRACTION = 0.8
 
 export function RouteMap({ comparison, from, to, selectedRoute, currentLocation, startRequest, onReroute, generatedRoute, onGeneratedRoute }: RouteMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -31,7 +37,7 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
   const markersRef = useRef<Marker[]>([])
   const selectedRouteRef = useRef(selectedRoute)
   const rerouteActionsRef = useRef<{ takeCoolerRoute: () => void; keepCurrentRoute: () => void } | null>(null)
-  const [showReroutePrompt, setShowReroutePrompt] = useState(false)
+  const [rerouteOffer, setRerouteOffer] = useState<{ exposureReduction: number } | null>(null)
 
   useEffect(() => {
     selectedRouteRef.current = selectedRoute
@@ -86,8 +92,10 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
     let startedAt = performance.now()
     let animationDuration = 10_000
     let paused = false
-    let promptShown = false
+    let declined = false
     let cleanedUp = false
+    let lastAssessedAt = 0
+    let offeredRoute: PlannedRoute | null = null
     const markerElement = document.createElement('div')
     markerElement.className = 'route-progress-marker'
     markerElement.setAttribute('aria-label', 'Route progress')
@@ -96,6 +104,8 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
     const startAnimation = () => {
       if (!map.isStyleLoaded()) return
       progressMarker = new Marker({ element: markerElement }).setLngLat(coordinates[0]).addTo(map)
+      startedAt = performance.now()
+      lastAssessedAt = startedAt
 
       const animate = (timestamp: number) => {
         if (cleanedUp || paused) return
@@ -111,37 +121,47 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
           start[0] + (end[0] - start[0]) * segmentProgress,
           start[1] + (end[1] - start[1]) * segmentProgress,
         ])
-        if (progress >= 0.45 && progress < 0.55 && !promptShown) {
-          promptShown = true
-          paused = true
-          setShowReroutePrompt(true)
+        if (!declined && progress < 0.9 && timestamp - lastAssessedAt >= REASSESS_INTERVAL_MS) {
+          lastAssessedAt = timestamp
+          const offer = coolerRouteAhead(
+            progressMarker?.getLngLat(),
+            to?.id,
+            routeCoordinatesForAnimation.slice(segmentIndex),
+          )
+          if (offer) {
+            offeredRoute = offer.route
+            paused = true
+            setRerouteOffer({ exposureReduction: offer.exposureReduction })
+            return
+          }
         }
         if (progress < 1) animationFrame = requestAnimationFrame(animate)
       }
 
       rerouteActionsRef.current = {
         takeCoolerRoute: () => {
-          if (cleanedUp || !progressMarker || !to) return
-          const currentPosition = progressMarker.getLngLat()
-          const generated = coolRouteFromHere([currentPosition.lng, currentPosition.lat], to.id)
-          if (!generated) return
-          const remainingCoordinates = generated.coordinates
+          if (cleanedUp || !progressMarker || !offeredRoute) return
+          const remainingCoordinates = offeredRoute.coordinates
           if (remainingCoordinates.length < 2) return
           routeCoordinatesForAnimation = remainingCoordinates
           progressMarker.setLngLat(remainingCoordinates[0])
           animationDuration = Math.max(2_500, 10_000 * (1 - routeProgress))
           startedAt = performance.now()
+          lastAssessedAt = performance.now()
           paused = false
-          setShowReroutePrompt(false)
-          onGeneratedRoute(generated)
+          setRerouteOffer(null)
+          onGeneratedRoute(offeredRoute)
           onReroute('coolGrid')
+          offeredRoute = null
           animationFrame = requestAnimationFrame(animate)
         },
         keepCurrentRoute: () => {
           if (cleanedUp) return
+          declined = true
+          offeredRoute = null
           startedAt = performance.now() - routeProgress * animationDuration
           paused = false
-          setShowReroutePrompt(false)
+          setRerouteOffer(null)
           animationFrame = requestAnimationFrame(animate)
         },
       }
@@ -158,16 +178,18 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
       cancelAnimationFrame(animationFrame)
       rerouteActionsRef.current = null
       progressMarker?.remove()
-      setShowReroutePrompt(false)
+      setRerouteOffer(null)
     }
   }, [comparison, currentLocation, startRequest, to, onReroute, onGeneratedRoute])
 
   return (
     <div ref={containerRef} className="relative h-full min-h-96 w-full">
-      {showReroutePrompt && (
+      {rerouteOffer && (
         <div className="absolute top-4 left-1/2 z-10 w-[min(20rem,calc(100%-2rem))] -translate-x-1/2 rounded-2xl bg-slate-900/95 px-4 py-3 text-white shadow-lg backdrop-blur-sm">
-          <p className="text-sm font-semibold">☀️ Cooler route found</p>
-          <p className="mt-0.5 text-xs text-slate-300">Would you like to take it?</p>
+          <p className="text-sm font-semibold">☀️ Cooler route available</p>
+          <p className="mt-0.5 text-xs text-slate-300">
+            About {rerouteOffer.exposureReduction}% lower estimated exposure for the rest of the trip.
+          </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
@@ -259,10 +281,27 @@ function updateMap(
   }
 }
 
-/** Re-plans the cool route from wherever the walker currently stands. */
-function coolRouteFromHere(currentPosition: RouteCoordinate, toId: string): PlannedRoute | null {
-  const replanned = planCoolRouteFrom(currentPosition, toId)
-  return replanned && replanned.coordinates.length >= 2 ? replanned : null
+/** Reassessment done while navigating: re-plans the trip still ahead of the
+ *  walker and reports a cooler alternative only when it is meaningfully cooler
+ *  and actually leaves the path being walked. */
+function coolerRouteAhead(
+  position: { lng: number; lat: number } | undefined,
+  toId: string | undefined,
+  pathAhead: RouteCoordinate[],
+) {
+  if (!position || !toId) return null
+  const ahead = planRoutesFrom([position.lng, position.lat], toId)
+  if (!ahead || ahead.exposureReduction === null) return null
+  const { fastest, heatWise } = ahead
+  if (heatWise.coordinates.length < 2) return null
+  if (fastest.exposure - heatWise.exposure < MIN_REROUTE_EXPOSURE_GAIN) return null
+  if (sharedFraction(heatWise.coordinates, pathAhead) > MAX_SHARED_FRACTION) return null
+  return { route: heatWise, exposureReduction: ahead.exposureReduction }
+}
+
+function sharedFraction(candidate: RouteCoordinate[], walked: RouteCoordinate[]) {
+  const keys = new Set(walked.map((coordinate) => coordinate.join(',')))
+  return candidate.filter((coordinate) => keys.has(coordinate.join(','))).length / candidate.length
 }
 
 function routeCoordinates(

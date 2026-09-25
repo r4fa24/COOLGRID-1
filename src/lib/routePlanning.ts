@@ -103,13 +103,19 @@ export function planRoutes(fromId: string, toId: string): RouteComparison | null
   }
 }
 
-/** Cool route from an arbitrary position (a walker mid-trip) to a planner POI. */
-export function planCoolRouteFrom(coordinate: RouteCoordinate, toId: string): PlannedRoute | null {
+/** Re-plans both routes from an arbitrary position (a walker mid-trip) to a
+ *  planner POI, so navigation can reassess what is still ahead of the walker. */
+export function planRoutesFrom(coordinate: RouteCoordinate, toId: string): RouteComparison | null {
   const to = poiCoordinates.get(toId)
   const target = snappedPoiNodes.get(toId)
   if (!to || target === undefined) return null
   const comparison = compareRoutes(nearestWalkNode(coordinate), target)
-  return comparison ? withEndpoints(comparison.heatWise, coordinate, to) : null
+  if (!comparison) return null
+  return {
+    ...comparison,
+    fastest: withEndpoints(comparison.fastest, coordinate, to),
+    heatWise: withEndpoints(comparison.heatWise, coordinate, to),
+  }
 }
 
 /** Adds the short walk between the door and the nearest network node, so the

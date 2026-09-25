@@ -5,7 +5,7 @@ Urban heat intelligence prototype for extreme-heat cities. Hackathon build — *
 ## Experiences
 
 - **City Intelligence** — interactive map of simulated heat-exposure zones, per-zone scores and factors, and a "What If?" intervention simulator.
-- **HeatWise Routes** — compare the fastest route against a lower-heat-exposure route. Both are searched independently on a real OpenStreetMap pedestrian network baked into `src/data/walkNetwork.ts`.
+- **HeatWise Routes** — compare the fastest route against a lower-heat-exposure route. Both are searched independently on a real OpenStreetMap pedestrian network baked into `src/data/walkNetwork.ts`. Once a trip starts, the walk still ahead is re-planned every couple of seconds from the walker's simulated position, and a "cooler route available" reroute is offered when the alternative is meaningfully cooler and leaves the path being walked.
 
 Today the shell plus the City Intelligence map exist. The Heat Exposure Score model, AI explanations, the "What If?" simulator and routing arrive in later tasks — the map currently shades zones with a temporary preview intensity.
 

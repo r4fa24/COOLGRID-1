@@ -105,7 +105,7 @@ export function RoutesPage() {
               </div>
             )}
             <RouteSelect label="To" value={toId} onChange={(value) => { setToId(value); setGeneratedRoute(null) }} excludeId={fromId} />
-            <p className="rounded-2xl bg-slate-900/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-500">Simulated walking network. Route geometry and heat exposure are estimated for this prototype, not live navigation.</p>
+            <p className="rounded-2xl bg-slate-900/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-500">Simulated walking network. Route geometry and heat exposure are estimated for this prototype, not live navigation. While a trip is running, the route ahead is re-planned every few seconds on the same estimated data and a cooler alternative is offered when one appears.</p>
           </div>
         </Panel>
         <Panel title="Route comparison" subtitle="Travel time vs. estimated heat exposure">
@@ -123,7 +123,7 @@ export function RoutesPage() {
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <RouteCard title="Fastest Route" route={timedRoutes?.fastest ?? null} accent="text-rose-500" hint="Shortest walking time." selected={selectedRoute === 'fastest'} onSelect={() => selectRoute('fastest')} />
-            <RouteCard title="CoolGrid Route" route={timedRoutes?.heatWise ?? null} accent="text-teal-500" hint="Balances walking time with lower estimated heat exposure." selected={selectedRoute === 'coolGrid'} onSelect={() => selectRoute('coolGrid')} />
+            <RouteCard title={generatedRoute ? 'CoolGrid Route · remaining trip' : 'CoolGrid Route'} route={timedRoutes?.heatWise ?? null} accent="text-teal-500" hint={generatedRoute ? 'Rerouted mid-trip: these figures cover the walk still ahead, so they are not comparable to the full fastest route.' : 'Balances walking time with lower estimated heat exposure.'} selected={selectedRoute === 'coolGrid'} onSelect={() => selectRoute('coolGrid')} />
           </div>
           <button
             type="button"
@@ -133,7 +133,7 @@ export function RoutesPage() {
           >
             Start
           </button>
-          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{timedExposureReduction !== null ? `↓ ${timedExposureReduction}% estimated exposure at ${timeProfile.label}` : 'No meaningful heat reduction found at this time.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
+          {comparison ? <p className="mt-4 text-sm font-medium text-teal-600">{generatedRoute ? 'Rerouted mid-trip — the CoolGrid card now covers the remaining walk only.' : timedExposureReduction !== null ? `↓ ${timedExposureReduction}% estimated exposure at ${timeProfile.label}` : 'No meaningful heat reduction found at this time.'}</p> : <p className="mt-4 text-sm text-slate-400">Select a starting point and destination to compare routes.</p>}
           {showExposureWarning && (
             <div className="mt-4 rounded-2xl border border-amber-300/60 bg-amber-50/80 px-4 py-3 text-sm text-amber-950">
               <p className="font-semibold">⚠️ High heat exposure along this route at {timeProfile.label}</p>
