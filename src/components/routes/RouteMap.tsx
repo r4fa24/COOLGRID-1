@@ -2,8 +2,9 @@ import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'map
 import type { GeoJSONSource, Map as MapInstance } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import { ROUTE_EDGES, type RouteNode } from '../../data/routeNetwork'
-import type { PlannedRoute, RouteComparison } from '../../lib/routePlanning'
+import type { RouteNode } from '../../data/routeNetwork'
+import { WALK_EDGES } from '../../data/walkNetwork'
+import { planCoolRouteFrom, type PlannedRoute, type RouteComparison } from '../../lib/routePlanning'
 import '../map/maplibreWorker'
 import { BASEMAP_STYLE_URL } from '../map/mapStyle'
 
@@ -22,6 +23,7 @@ type RouteMapProps = {
 type RouteCoordinate = [number, number]
 
 const ROUTES_SOURCE = 'simulated-routes'
+const NETWORK_SOURCE = 'walking-network'
 
 export function RouteMap({ comparison, from, to, selectedRoute, currentLocation, startRequest, onReroute, generatedRoute, onGeneratedRoute }: RouteMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -47,7 +49,11 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
     map.addControl(new NavigationControl({ showCompass: false }), 'bottom-right')
     map.on('load', () => {
       map.addSource(ROUTES_SOURCE, { type: 'geojson', data: emptyFeatureCollection() })
-      map.addLayer({ id: 'simulated-route-network', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'network'], paint: { 'line-color': '#94a3b8', 'line-width': 1.5, 'line-opacity': 0.45, 'line-dasharray': [2, 2] } })
+      map.addSource(NETWORK_SOURCE, {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: WALK_EDGES.map((edge) => lineFeature(edge[5], 'network')) },
+      })
+      map.addLayer({ id: 'walking-network', type: 'line', source: NETWORK_SOURCE, minzoom: 13.5, paint: { 'line-color': '#94a3b8', 'line-width': 1, 'line-opacity': 0.22 } })
       map.addLayer({ id: 'fastest-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'fastest'], paint: { 'line-color': '#fb7185', 'line-width': 5, 'line-opacity': 0.9 } })
       map.addLayer({ id: 'heatwise-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'heatwise'], paint: { 'line-color': '#14b8a6', 'line-width': 5, 'line-opacity': 0.95 } })
       map.addLayer({ id: 'generated-cooler-route', type: 'line', source: ROUTES_SOURCE, filter: ['==', ['get', 'kind'], 'generated-cooler'], paint: { 'line-color': '#2dd4bf', 'line-width': 7, 'line-opacity': 0.98 } })
@@ -115,13 +121,9 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
 
       rerouteActionsRef.current = {
         takeCoolerRoute: () => {
-          if (cleanedUp || !progressMarker) return
+          if (cleanedUp || !progressMarker || !to) return
           const currentPosition = progressMarker.getLngLat()
-          const generated = createGeneratedCoolerRoute(
-            comparison,
-            routeCoordinatesForAnimation,
-            [currentPosition.lng, currentPosition.lat],
-          )
+          const generated = coolRouteFromHere([currentPosition.lng, currentPosition.lat], to.id)
           if (!generated) return
           const remainingCoordinates = generated.coordinates
           if (remainingCoordinates.length < 2) return
@@ -158,7 +160,7 @@ export function RouteMap({ comparison, from, to, selectedRoute, currentLocation,
       progressMarker?.remove()
       setShowReroutePrompt(false)
     }
-  }, [comparison, currentLocation, startRequest, onReroute, onGeneratedRoute])
+  }, [comparison, currentLocation, startRequest, to, onReroute, onGeneratedRoute])
 
   return (
     <div ref={containerRef} className="relative h-full min-h-96 w-full">
@@ -201,7 +203,6 @@ function updateMap(
   const source = map.getSource(ROUTES_SOURCE) as GeoJSONSource | undefined
   if (!source) return
   const features = [
-    ...ROUTE_EDGES.map((edge) => lineFeature(edge.coordinates, 'network')),
     ...(comparison
       ? [
           lineFeature(routeCoordinates(comparison.fastest.coordinates, currentLocation), 'fastest'),
@@ -258,66 +259,11 @@ function updateMap(
   }
 }
 
-function nearestCoordinateIndex(coordinates: RouteCoordinate[], target: RouteCoordinate) {
-  return coordinates.reduce((nearestIndex, coordinate, index) => {
-    const nearestDistance = coordinateDistance(coordinates[nearestIndex] ?? coordinates[0], target)
-    return coordinateDistance(coordinate, target) < nearestDistance ? index : nearestIndex
-  }, 0)
-}
-
-function coordinateDistance(first: RouteCoordinate, second: RouteCoordinate) {
-  return Math.hypot(first[0] - second[0], first[1] - second[1])
-}
-
-function createGeneratedCoolerRoute(
-  comparison: RouteComparison | null,
-  currentCoordinates: RouteCoordinate[],
-  currentPosition: RouteCoordinate,
-) {
-  if (!comparison || comparison.heatWise.exposure >= comparison.fastest.exposure) return null
-  const currentRoute = currentCoordinates.slice(nearestCoordinateIndex(currentCoordinates, currentPosition))
-  const coolerRoute = comparison.heatWise.coordinates
-  const sourceRoute =
-    coordinateDistance(
-      coolerRoute[Math.floor(coolerRoute.length / 2)] ?? coolerRoute[0],
-      currentRoute[Math.floor(currentRoute.length / 2)] ?? currentRoute[0],
-    ) > 0.00001
-      ? coolerRoute
-      : comparison.fastest.coordinates
-  if (sourceRoute.length < 2 || currentRoute.length < 2) return null
-  const sourceStart = nearestCoordinateIndex(sourceRoute, currentPosition)
-  const sourceRemainder = sourceRoute.slice(sourceStart)
-  if (sourceRemainder.length < 2) return null
-
-  const points: RouteCoordinate[] = [currentPosition]
-  const sampleCount = Math.max(4, Math.min(8, Math.max(currentRoute.length, sourceRemainder.length)))
-  for (let index = 1; index < sampleCount; index += 1) {
-    const progress = index / (sampleCount - 1)
-    const currentPoint = interpolateCoordinate(currentRoute, progress)
-    const coolerPoint = interpolateCoordinate(sourceRemainder, progress)
-    const divergence = Math.sin(progress * Math.PI) * 0.7
-    points.push([
-      currentPoint[0] + (coolerPoint[0] - currentPoint[0]) * divergence,
-      currentPoint[1] + (coolerPoint[1] - currentPoint[1]) * divergence,
-    ])
-  }
-  points[points.length - 1] = sourceRemainder[sourceRemainder.length - 1]
-  return {
-    nodeIds: comparison.heatWise.nodeIds,
-    coordinates: points,
-    distanceMeters: Math.round(comparison.heatWise.distanceMeters * 1.08),
-    walkingMinutes: Math.max(1, Math.round((comparison.heatWise.distanceMeters * 1.08) / 80)),
-    exposure: comparison.heatWise.exposure,
-  } satisfies PlannedRoute
-}
-
-function interpolateCoordinate(coordinates: RouteCoordinate[], progress: number): RouteCoordinate {
-  const position = progress * (coordinates.length - 1)
-  const index = Math.min(coordinates.length - 2, Math.max(0, Math.floor(position)))
-  const fraction = position - index
-  const start = coordinates[index] ?? coordinates[0]
-  const end = coordinates[index + 1] ?? start
-  return [start[0] + (end[0] - start[0]) * fraction, start[1] + (end[1] - start[1]) * fraction]
+/** Re-plans the cool route from wherever the walker currently stands. */
+function coolRouteFromHere(currentPosition: RouteCoordinate, toId: string): PlannedRoute | null {
+  const replanned = planCoolRouteFrom(currentPosition, toId)
+  if (!replanned || replanned.coordinates.length < 2) return null
+  return { ...replanned, coordinates: [currentPosition, ...replanned.coordinates] }
 }
 
 function routeCoordinates(

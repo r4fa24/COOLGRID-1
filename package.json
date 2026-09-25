@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "build:walk-network": "node --experimental-strip-types scripts/buildWalkNetwork.ts",
+    "check:routes": "node --experimental-strip-types scripts/checkRoutes.ts",
     "preview": "vite preview"
   },
   "dependencies": {
